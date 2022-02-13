@@ -16,6 +16,7 @@ pub struct GMap {
     pub ignore: Option<bool>,
     pub name: String,
     pub pvp: Option<bool>,
+    pub spawns: Vec<Vec<f32>>,
 }
 
 #[derive(Deserialize)]
