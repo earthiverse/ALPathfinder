@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 pub struct GGeometry {
     pub min_x: i32,
     pub max_x: i32,
@@ -11,11 +11,10 @@ pub struct GGeometry {
     pub y_lines: Option<Vec<Vec<i32>>>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 pub struct GMap {
     pub ignore: Option<bool>,
     pub name: String,
-    pub pvp: Option<bool>,
     pub spawns: Vec<Vec<f32>>,
 }
 

@@ -6,7 +6,7 @@ This project is a work in progress. It currently doesn't work.
 
 ## Build
 
-1. Run `wasm-pack` to build.
+1. Run `wasm-pack build` to build.
 2. Add the following lines to `package.json`:
 
 ```js
@@ -17,4 +17,3 @@ This project is a work in progress. It currently doesn't work.
 ## Use Locally
 
 1. In the node project you want to use the pathfinder, run `npm install alpathfinder@file:../path/to/alpathfinder`.
-2. Run your project in node with the flag `--experimental-wasm-modules`.

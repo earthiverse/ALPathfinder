@@ -1,8 +1,11 @@
 use core::cmp::{max, min};
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
+use serde_wasm_bindgen::from_value;
 use std::collections::HashMap;
-use std::sync::Mutex;
-use wasm_bindgen::prelude::*;
+use std::sync::RwLock;
+use wasm_bindgen::prelude::wasm_bindgen;
+use wasm_bindgen::JsValue;
+use web_time::Instant;
 
 mod g;
 use crate::g::*;
@@ -20,24 +23,19 @@ struct Grid {
     data: Vec<u8>,
 }
 
-lazy_static! {
-    static ref GRIDS: Mutex<HashMap<String, Grid>> = {
-        let m = HashMap::new();
-        Mutex::new(m)
-    };
-}
+static GRIDS: Lazy<RwLock<HashMap<String, Grid>>> = Lazy::new(|| {
+    let m = HashMap::new();
+    RwLock::new(m)
+});
 
 const BASE_H: i32 = 8;
 const BASE_V: i32 = 7;
 const BASE_VN: i32 = 2;
-const UNKNOWN: u8 = 1;
-const NOT_WALKABLE: u8 = 2;
-const WALKABLE: u8 = 3;
+const UNKNOWN: u8 = 0;
+const NOT_WALKABLE: u8 = 1;
+const WALKABLE: u8 = 2;
 
 pub fn prepare_map(g: &GData, map_name: &String) {
-    // log(&format!("Preparing {}...", map_name));
-    // let start = instant::Instant::now();
-
     // Get the data
     let map = g.maps.get(map_name).unwrap();
     let geometry = g.geometry.get(map_name).unwrap();
@@ -142,28 +140,19 @@ pub fn prepare_map(g: &GData, map_name: &String) {
     }
 
     // Add to hashmap
-    let mut grids = GRIDS.lock().unwrap();
+    let mut grids = GRIDS.write().unwrap();
     grids.insert(map_name.to_string(), grid);
-
-    // DEBUG Output
-    // log(&format!(
-    //     "  Prepared grid for {} in {}ms!",
-    //     map_name,
-    //     start.elapsed().as_millis()
-    // ));
 }
 
 #[wasm_bindgen]
-pub fn prepare(g_js: &JsValue) {
+pub fn prepare(g_js: JsValue) {
     // Convert 'G' to a variable we can use
-    let g: GData = g_js.into_serde().unwrap();
+    let g: GData = from_value(g_js).unwrap();
 
-    let start = instant::Instant::now();
+    let start = Instant::now();
     for (map_name, map) in &g.maps {
-        // Skip ignored maps
-        match map.ignore {
-            None => {}
-            Some(_v) => continue,
+        if map.ignore.is_some() {
+            continue; // Skip ignored maps
         }
 
         // Make the grid
@@ -177,13 +166,22 @@ pub fn prepare(g_js: &JsValue) {
 
 #[wasm_bindgen]
 pub fn is_walkable(map_name: &str, x_i: i32, y_i: i32) -> bool {
-    let grids = GRIDS.lock().unwrap();
-    let grid = grids.get(map_name).unwrap();
+    let grids = GRIDS.read().unwrap();
+    let grid = match grids.get(map_name) {
+        Some(g) => g,
+        None => return false,
+    };
 
     // Convert the game coordinates to grid coordinates
     let x = x_i - grid.min_x;
     let y = y_i - grid.min_y;
 
-    let cell = grid.data[(y * grid.width + x) as usize];
-    return cell == WALKABLE;
+    if x < 0 || y < 0 {
+        return false;
+    }
+
+    return match grid.data.get((y * grid.width + x) as usize) {
+        Some(&cell) => cell == WALKABLE,
+        None => false,
+    };
 }
