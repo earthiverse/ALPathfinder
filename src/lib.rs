@@ -161,14 +161,17 @@ pub fn prepare(g_js: JsValue) {
         // Make the grid
         prepare_map(&g, map_name);
     }
+
+    // TODO: For debugging, remove later
     log(&format!(
-        "Prepared all maps in {}ms!",
+        "Prepared {} maps in {}ms!",
+        GRIDS.read().unwrap().len(),
         start.elapsed().as_millis()
     ))
 }
 
 #[wasm_bindgen]
-pub fn is_walkable(map_name: &str, x_i: i32, y_i: i32) -> bool {
+pub fn is_walkable(map_name: &str, x: i32, y: i32) -> bool {
     let grids = GRIDS.read().unwrap();
     let grid = match grids.get(map_name) {
         Some(g) => g,
@@ -176,8 +179,8 @@ pub fn is_walkable(map_name: &str, x_i: i32, y_i: i32) -> bool {
     };
 
     // Convert the game coordinates to grid coordinates
-    let x = x_i - grid.min_x;
-    let y = y_i - grid.min_y;
+    let x = x - grid.min_x;
+    let y = y - grid.min_y;
 
     if x < 0 || y < 0 {
         return false;
@@ -187,4 +190,153 @@ pub fn is_walkable(map_name: &str, x_i: i32, y_i: i32) -> bool {
         .data
         .get((y * grid.width + x) as usize)
         .unwrap_or(false);
+}
+
+#[wasm_bindgen]
+pub fn can_walk_path(map_name: &str, x1: i32, y1: i32, x2: i32, y2: i32) -> bool {
+    let grids = GRIDS.read().unwrap();
+    let grid = match grids.get(map_name) {
+        Some(g) => g,
+        None => return false,
+    };
+
+    let x_step: i32;
+    let y_step: i32;
+    let mut error: i32;
+    let mut error_prev: i32;
+    let mut x: i32 = x1 - grid.min_x;
+    let mut y: i32 = y1 - grid.min_y;
+    let mut dx: i32 = x2 - x1;
+    let mut dy: i32 = y2 - y1;
+
+    if !grid
+        .data
+        .get((y * grid.width + x) as usize)
+        .unwrap_or(false)
+    {
+        return false;
+    }
+
+    if dy < 0 {
+        y_step = -1;
+        dy = -dy;
+    } else {
+        y_step = 1;
+    }
+
+    if dx < 0 {
+        x_step = -1;
+        dx = -dx;
+    } else {
+        x_step = 1;
+    }
+    let ddy = 2 * dy;
+    let ddx = 2 * dx;
+
+    if ddx >= ddy {
+        error_prev = dx;
+        error = dx;
+        for _i in 0..dx {
+            x += x_step;
+            error += ddy;
+            if error > ddx {
+                y += y_step;
+                error -= ddx;
+
+                if error + error_prev < ddx {
+                    if !grid
+                        .data
+                        .get(((y - y_step) * grid.width + x) as usize)
+                        .unwrap_or(false)
+                    {
+                        return false;
+                    }
+                } else if error + error_prev > ddx {
+                    if !grid
+                        .data
+                        .get((y * grid.width + x - x_step) as usize)
+                        .unwrap_or(false)
+                    {
+                        return false;
+                    }
+                } else {
+                    if !grid
+                        .data
+                        .get(((y - y_step) * grid.width + x) as usize)
+                        .unwrap_or(false)
+                    {
+                        return false;
+                    }
+                    if !grid
+                        .data
+                        .get((y * grid.width + x - x_step) as usize)
+                        .unwrap_or(false)
+                    {
+                        return false;
+                    }
+                }
+            }
+            if !grid
+                .data
+                .get((y * grid.width + x) as usize)
+                .unwrap_or(false)
+            {
+                return false;
+            }
+            error_prev = error;
+        }
+    } else {
+        error_prev = dy;
+        error = dy;
+        for _i in 0..dy {
+            y += y_step;
+            error += ddx;
+            if error > ddy {
+                x += x_step;
+                error -= ddy;
+                if error + error_prev < ddy {
+                    if !grid
+                        .data
+                        .get((y * grid.width + x - x_step) as usize)
+                        .unwrap_or(false)
+                    {
+                        return false;
+                    }
+                } else if error + error_prev > ddy {
+                    if !grid
+                        .data
+                        .get(((y - y_step) * grid.width + x) as usize)
+                        .unwrap_or(false)
+                    {
+                        return false;
+                    }
+                } else {
+                    if !grid
+                        .data
+                        .get((y * grid.width + x - x_step) as usize)
+                        .unwrap_or(false)
+                    {
+                        return false;
+                    }
+                    if !grid
+                        .data
+                        .get(((y - y_step) * grid.width + x) as usize)
+                        .unwrap_or(false)
+                    {
+                        return false;
+                    }
+                }
+            }
+            if !grid
+                .data
+                .get((y * grid.width + x) as usize)
+                .unwrap_or(false)
+            {
+                return false;
+            }
+            error_prev = error;
+        }
+    }
+
+    return true;
 }
