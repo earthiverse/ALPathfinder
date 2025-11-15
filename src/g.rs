@@ -15,6 +15,7 @@ pub struct GGeometry {
 pub struct GMap {
     pub ignore: Option<bool>,
     pub name: String,
+    pub npcs: Option<Vec<GNpc>>,
     pub spawns: Vec<Vec<f32>>,
 }
 
@@ -23,4 +24,11 @@ pub struct GData {
     pub geometry: HashMap<String, GGeometry>,
     pub maps: HashMap<String, GMap>,
     pub version: u64,
+}
+
+#[derive(Deserialize)]
+pub struct GNpc {
+    pub id: String,
+    pub position: Option<Vec<f32>>,
+    pub positions: Option<Vec<Vec<f32>>>
 }
