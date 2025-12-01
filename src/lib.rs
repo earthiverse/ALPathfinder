@@ -219,10 +219,42 @@ pub fn prepare_map(g: &GData, map_name: &String) {
         get_or_add_node(triangulation.vertex(handle.unwrap()).data());
     }
 
-    // TODO: Add nodes for doors
-    // TODO: Add door edges
     for door in &map.doors {
-        // TODO: Make nodes at the four corners of the door
+        let half_w = door.width * 0.5;
+        let half_h = door.height * 0.5;
+
+        let points = [
+            Point2::new(door.x, door.y),
+            Point2::new(door.x - half_w, door.y - half_h),
+            Point2::new(door.x + half_w, door.y - half_h),
+            Point2::new(door.x + half_w, door.y + half_h),
+            Point2::new(door.x - half_w, door.y + half_h),
+        ];
+
+        let destination_map_id = get_or_create_map_id(&door.map_to);
+        let destination_spawn = g
+            .maps
+            .get(&door.map_to)
+            .unwrap()
+            .spawns
+            .get(door.spawn_to as usize)
+            .unwrap();
+        let destination_node = Node {
+            map_id: destination_map_id,
+            point: Point2::new(destination_spawn.x, destination_spawn.y),
+        };
+        let destination_node_index = get_or_add_node(&destination_node);
+
+        // Add nodes and edges for doors
+        for point in points {
+            if !is_walkable(map_name, point.x.trunc() as i32, point.y.trunc() as i32) {
+                continue;
+            }
+            let handle = triangulation.insert(Node { map_id, point });
+            let index = get_or_add_node(triangulation.vertex(handle.unwrap()).data());
+            let mut graph = GRAPH.write().unwrap();
+            graph.add_edge(index, destination_node_index, Edge { method: DOOR });
+        }
     }
 
     // Add nodes for transporters
