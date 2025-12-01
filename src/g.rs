@@ -79,6 +79,51 @@ where
         .collect())
 }
 
+#[derive(Debug)]
+pub struct GSpawn {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl<'de> Deserialize<'de> for GSpawn {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value: serde_json::Value = Deserialize::deserialize(deserializer)?;
+
+        if let Some(arr) = value.as_array() {
+            if arr.len() >= 2 {
+                let x = arr[0]
+                    .as_f64()
+                    .ok_or_else(|| serde::de::Error::custom("Invalid x"))?
+                    as f32;
+                let y = arr[1]
+                    .as_f64()
+                    .ok_or_else(|| serde::de::Error::custom("Invalid y"))?
+                    as f32;
+
+                return Ok(GSpawn { x, y });
+            }
+        }
+
+        Err(serde::de::Error::custom(
+            "Spawn array must have at least 2 elements",
+        ))
+    }
+}
+
+fn deserialize_spawns<'de, D>(deserializer: D) -> Result<Vec<GSpawn>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values: Vec<serde_json::Value> = Deserialize::deserialize(deserializer)?;
+    Ok(values
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect())
+}
+
 #[derive(Deserialize, Debug)]
 pub struct GGeometry {
     pub min_x: i32,
@@ -90,20 +135,14 @@ pub struct GGeometry {
 }
 
 #[derive(Deserialize, Debug)]
-pub struct GData {
-    pub geometry: HashMap<String, GGeometry>,
-    pub maps: HashMap<String, GMap>,
-    pub version: u32,
-}
-
-#[derive(Deserialize, Debug)]
 pub struct GMap {
     #[serde(deserialize_with = "deserialize_doors")]
     pub doors: Vec<GDoor>,
     pub ignore: Option<bool>,
     pub name: String,
     pub npcs: Option<Vec<GNpc>>,
-    pub spawns: Vec<Vec<f32>>,
+    #[serde(deserialize_with = "deserialize_spawns")]
+    pub spawns: Vec<GSpawn>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -111,4 +150,11 @@ pub struct GNpc {
     pub id: String,
     pub position: Option<Vec<f32>>,
     pub positions: Option<Vec<Vec<f32>>>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GData {
+    pub geometry: HashMap<String, GGeometry>,
+    pub maps: HashMap<String, GMap>,
+    pub version: u32,
 }

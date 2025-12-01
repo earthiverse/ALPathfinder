@@ -86,8 +86,8 @@ pub fn prepare_map(g: &GData, map_name: &String) {
 
     // Fill in the walkable areas
     for spawn in &map.spawns {
-        let x = spawn[0].trunc() as i32 - geometry.min_x;
-        let y = spawn[1].trunc() as i32 - geometry.min_y;
+        let x = spawn.x.trunc() as i32 - geometry.min_x;
+        let y = spawn.y.trunc() as i32 - geometry.min_y;
 
         if temp_data[(y * width + x) as usize] == WALKABLE {
             // We've already determined this area is walkable
