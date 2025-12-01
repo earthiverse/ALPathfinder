@@ -1,7 +1,9 @@
 use bit_vec::BitVec;
 use core::cmp::{max, min};
 use once_cell::sync::Lazy;
+use petgraph::algo::astar;
 use petgraph::graph::{Graph, NodeIndex};
+use petgraph::visit::EdgeRef;
 use serde_wasm_bindgen::from_value;
 use spade::{DelaunayTriangulation, FloatTriangulation, HasPosition, Point2, Triangulation};
 use std::collections::HashMap;
@@ -136,6 +138,52 @@ fn get_or_create_map_id(map_name: &str) -> u16 {
 fn get_map_name(map_id: u32) -> Option<String> {
     let names = MAP_NAMES.read().unwrap();
     names.get(map_id as usize).cloned()
+}
+
+fn find_closest_node(
+    graph: &Graph<Node, Edge>,
+    map_name: &str,
+    x: f32,
+    y: f32,
+) -> Option<NodeIndex> {
+    let target_map_id = {
+        let indices = MAP_INDICES.read().unwrap();
+        match indices.get(map_name) {
+            Some(&id) => id,
+            None => return None,
+        }
+    };
+    let mut closest_index: Option<NodeIndex> = None;
+    let mut min_distance = f32::MAX;
+
+    for node_index in graph.node_indices() {
+        let node = &graph[node_index];
+        if node.map_id != target_map_id {
+            continue;
+        }
+
+        let dx = node.point.x - x;
+        let dy = node.point.y - y;
+        let distance = dx * dx + dy * dy;
+
+        if distance < min_distance
+            && can_walk_path(
+                map_name,
+                node.point.x.trunc() as i32,
+                node.point.y.trunc() as i32,
+                x.trunc() as i32,
+                y.trunc() as i32,
+            )
+        {
+            min_distance = distance;
+            closest_index = Some(node_index);
+        }
+        if distance <= 1.0 {
+            return closest_index;
+        }
+    }
+
+    return closest_index;
 }
 
 pub fn prepare_map(g: &GData, map_name: &String) {
@@ -330,6 +378,8 @@ pub fn prepare_map(g: &GData, map_name: &String) {
         }
     }
 
+    // TODO: Add edges to town spawn
+
     // Add all nodes to graph
     for edge in triangulation.undirected_edges() {
         let [p1, p2] = edge.vertices();
@@ -505,49 +555,94 @@ pub fn is_walkable(map_name: &str, x_i: i32, y_i: i32) -> bool {
 
 #[wasm_bindgen]
 pub fn get_path(
-    map_name_from: &str,
+    map_from_name: &str,
+    // TODO: Add instance
     x_from: f32,
     y_from: f32,
-    map_name_to: &str,
+    map_to_name: &str,
+    // TODO: Add instance
     x_to: f32,
     y_to: f32,
+    speed: Option<f32>,
 ) -> JsValue {
+    let base_speed = speed.unwrap_or(50.0);
+
     let graph = GRAPH.read().unwrap();
-    let node_map = NODE_MAP.read().unwrap();
 
-    let map_id_from = {
-        let indices = MAP_INDICES.read().unwrap();
-        match indices.get(map_name_from) {
-            Some(&id) => id,
-            None => return JsValue::NULL,
-        }
-    };
-
-    let map_id_to = {
-        let indices = MAP_INDICES.read().unwrap();
-        match indices.get(map_name_to) {
-            Some(&id) => id,
-            None => return JsValue::NULL,
-        }
-    };
-
-    let start_node = Node {
-        map_id: map_id_from,
-        point: Point2::new(x_from, y_from),
-    };
-    let end_node = Node {
-        map_id: map_id_to,
-        point: Point2::new(x_to, y_to),
-    };
-
-    let start_index = match node_map.get(&start_node) {
-        Some(&index) => index,
+    // Find closest existing nodes
+    let start_node = match find_closest_node(&graph, map_from_name, x_from, y_from) {
+        Some(node) => node,
         None => return JsValue::NULL,
     };
-    let end_index = match node_map.get(&end_node) {
-        Some(&index) => index,
+    let end_node = match find_closest_node(&graph, map_to_name, x_to, y_to) {
+        Some(node) => node,
         None => return JsValue::NULL,
     };
+
+    // A* pathfinding
+    let result = astar(
+        &*graph,
+        start_node,
+        |node| node == end_node, // goal condition
+        |edge| match edge.weight().method {
+            WALK => {
+                let source = &graph[edge.source()];
+                let target = &graph[edge.target()];
+
+                let dx = target.point.x - source.point.x;
+                let dy = target.point.y - source.point.y;
+                (dx * dx + dy * dy).sqrt().round()
+            }
+            TRANSPORT => 3200.0,
+            TOWN => 812.0,
+            DOOR => 812.0,
+            ENTER => 812.0,
+            _ => 0.0,
+        },
+        |node| {
+            let current = &graph[node];
+            let goal = &graph[end_node];
+
+            if current.map_id != goal.map_id {
+                return 100_000.0; // We need to get to another map
+            }
+
+            let dx = goal.point.x - current.point.x;
+            let dy = goal.point.y - current.point.y;
+            return ((dx * dx + dy * dy).sqrt() / base_speed).round();
+        },
+    );
+
+    match result {
+        Some((_cost, path)) => {
+            // Convert path to something you can return to JS
+            // path is Vec<NodeIndex>
+            serialize_path(&graph, path)
+        }
+        None => JsValue::NULL,  // No path found
+    }
+}
+
+fn serialize_path(graph: &Graph<Node, Edge>, path: Vec<NodeIndex>) -> JsValue {
+    use serde::Serialize;
+    
+    #[derive(Serialize)]
+    struct PathNode {
+        map: String,
+        x: f32,
+        y: f32,
+    }
+    
+    let path_nodes: Vec<PathNode> = path.iter().map(|&idx| {
+        let node = &graph[idx];
+        PathNode {
+            map: get_map_name(node.map_id as u32).unwrap_or_default(),
+            x: node.point.x,
+            y: node.point.y,
+        }
+    }).collect();
+    
+    serde_wasm_bindgen::to_value(&path_nodes).unwrap()
 }
 
 #[wasm_bindgen]
