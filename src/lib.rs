@@ -504,6 +504,53 @@ pub fn is_walkable(map_name: &str, x_i: i32, y_i: i32) -> bool {
 }
 
 #[wasm_bindgen]
+pub fn get_path(
+    map_name_from: &str,
+    x_from: f32,
+    y_from: f32,
+    map_name_to: &str,
+    x_to: f32,
+    y_to: f32,
+) -> JsValue {
+    let graph = GRAPH.read().unwrap();
+    let node_map = NODE_MAP.read().unwrap();
+
+    let map_id_from = {
+        let indices = MAP_INDICES.read().unwrap();
+        match indices.get(map_name_from) {
+            Some(&id) => id,
+            None => return JsValue::NULL,
+        }
+    };
+
+    let map_id_to = {
+        let indices = MAP_INDICES.read().unwrap();
+        match indices.get(map_name_to) {
+            Some(&id) => id,
+            None => return JsValue::NULL,
+        }
+    };
+
+    let start_node = Node {
+        map_id: map_id_from,
+        point: Point2::new(x_from, y_from),
+    };
+    let end_node = Node {
+        map_id: map_id_to,
+        point: Point2::new(x_to, y_to),
+    };
+
+    let start_index = match node_map.get(&start_node) {
+        Some(&index) => index,
+        None => return JsValue::NULL,
+    };
+    let end_index = match node_map.get(&end_node) {
+        Some(&index) => index,
+        None => return JsValue::NULL,
+    };
+}
+
+#[wasm_bindgen]
 pub fn can_walk_path(map_name: &str, x1: i32, y1: i32, x2: i32, y2: i32) -> bool {
     let grids = GRIDS.read().unwrap();
     let grid = match grids.get(map_name) {
