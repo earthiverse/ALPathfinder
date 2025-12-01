@@ -39,14 +39,11 @@ const TRANSPORT_RADIUS: u8 = 150;
 struct Node {
     map_id: u16,
     point: Point2<f32>,
-    method: u8,
 }
 
 impl PartialEq for Node {
     fn eq(&self, other: &Self) -> bool {
-        return self.map_id == other.map_id
-            && self.point == other.point
-            && self.method == other.method;
+        return self.map_id == other.map_id && self.point == other.point;
     }
 }
 impl Eq for Node {}
@@ -55,7 +52,6 @@ impl std::hash::Hash for Node {
         self.map_id.hash(state);
         self.point.x.to_bits().hash(state);
         self.point.y.to_bits().hash(state);
-        self.method.hash(state);
     }
 }
 
@@ -69,13 +65,12 @@ impl HasPosition for Node {
 
 const WALK: u8 = 1;
 const TOWN: u8 = 2;
-const DOOR: u8 = 3;
-const TRANSPORT: u8 = 4;
-const ENTER: u8 = 5;
+const DOOR: u8 = 4;
+const TRANSPORT: u8 = 8;
+const ENTER: u8 = 16;
 
 struct Edge {
     method: u8,
-    cost: f32,
 }
 
 const INSIDE_1: u8 = 0b0010_1111;
@@ -206,63 +201,97 @@ pub fn prepare_map(g: &GData, map_name: &String) {
                 || mask == OUTSIDE_3
                 || mask == OUTSIDE_4
             {
-                let _ = triangulation.insert(Node {
+                let handle = triangulation.insert(Node {
                     map_id,
                     point: Point2::new((x + geometry.min_x) as f32, (y + geometry.min_y) as f32),
-                    method: WALK,
                 });
+                get_or_add_node(triangulation.vertex(handle.unwrap()).data());
             }
         }
     }
 
+    // Add nodes at spawn points
+    for spawn in &map.spawns {
+        let handle = triangulation.insert(Node {
+            map_id,
+            point: Point2::new(spawn.x, spawn.y),
+        });
+        get_or_add_node(triangulation.vertex(handle.unwrap()).data());
+    }
+
     // TODO: Add nodes for doors
-    log(&format!("{} has {} doors.", map_name, map.doors.len()));
     // TODO: Add door edges
-    // TODO: Add nodes for spawns
+    for door in &map.doors {
+        // TODO: Make nodes at the four corners of the door
+    }
 
-    // Add nodes for teleporters
-    if let Some(npcs) = &map.npcs {
-        for npc in npcs {
-            if npc.id != "teleporter" {
-                continue;
+    // Add nodes for transporters
+    for npc in map.npcs.as_ref().unwrap() {
+        if npc.id != "transporter" {
+            continue;
+        }
+
+        // Make list of transporter destination nodes
+        let mut destination_nodes: Vec<NodeIndex> = Vec::new();
+        for (destination_map_name, &destination_spawn_index) in
+            g.npcs.get("transporter").unwrap().places.as_ref().unwrap()
+        {
+            if destination_map_name == map_name {
+                continue; // Can't transport to same map
             }
+            let destination_map_id = get_or_create_map_id(destination_map_name);
+            let destination_spawn = g
+                .maps
+                .get(destination_map_name)
+                .unwrap()
+                .spawns
+                .get(destination_spawn_index as usize)
+                .unwrap();
 
-            if let Some(pos) = &npc.position {
-                let x = pos[0];
-                let y = pos[1];
+            let destination_node = Node {
+                map_id: destination_map_id,
+                point: Point2::new(destination_spawn.x, destination_spawn.y),
+            };
+            destination_nodes.push(get_or_add_node(&destination_node));
+        }
+
+        // Add transporter links to other maps
+        if let Some(pos) = &npc.position {
+            let x = pos[0];
+            let y = pos[1];
+
+            let _ = triangulation.insert(Node {
+                map_id,
+                point: Point2::new(x, y),
+            });
+
+            let nearby =
+                triangulation.get_vertices_in_circle(Point2 { x, y }, TRANSPORT_RADIUS as f32);
+            for n in nearby {
+                let n_index = get_or_add_node(&n.data());
+                for destination_node in &destination_nodes {
+                    let mut graph = GRAPH.write().unwrap();
+                    graph.add_edge(n_index, *destination_node, Edge { method: TRANSPORT });
+                }
+            }
+        }
+        if let Some(positions) = &npc.positions {
+            for p in positions {
+                let x = p[0];
+                let y = p[1];
 
                 let _ = triangulation.insert(Node {
                     map_id,
                     point: Point2::new(x, y),
-                    method: TRANSPORT,
                 });
 
                 let nearby =
                     triangulation.get_vertices_in_circle(Point2 { x, y }, TRANSPORT_RADIUS as f32);
                 for n in nearby {
-                    let n_data = n.data();
-                    let n_index = get_or_add_node(&n_data);
-                    // TODO: Add edges from radius here?
-                }
-            }
-
-            if let Some(positions) = &npc.positions {
-                for p in positions {
-                    let x = p[0];
-                    let y = p[1];
-
-                    let _ = triangulation.insert(Node {
-                        map_id,
-                        point: Point2::new(x, y),
-                        method: TRANSPORT,
-                    });
-
-                    let nearby = triangulation
-                        .get_vertices_in_circle(Point2 { x, y }, TRANSPORT_RADIUS as f32);
-                    for n in nearby {
-                        let n_data = n.data();
-                        let n_index = get_or_add_node(&n_data);
-                        // TODO: Add edges from radius here?
+                    let n_index = get_or_add_node(&n.data());
+                    for destination_node in &destination_nodes {
+                        let mut graph = GRAPH.write().unwrap();
+                        graph.add_edge(n_index, *destination_node, Edge { method: TRANSPORT });
                     }
                 }
             }
@@ -285,14 +314,16 @@ pub fn prepare_map(g: &GData, map_name: &String) {
             continue;
         }
 
-        let cost = edge.length_2().sqrt();
+        // TODO: Calculate cost taking speed in to account when using A*
+        // let cost = edge.length_2().sqrt();
+
         let p1_index = get_or_add_node(&p1_data);
         let p2_index = get_or_add_node(&p2_data);
 
         // Add the edges
         let mut graph = GRAPH.write().unwrap();
-        graph.add_edge(p1_index, p2_index, Edge { method: WALK, cost });
-        graph.add_edge(p2_index, p1_index, Edge { method: WALK, cost });
+        graph.add_edge(p1_index, p2_index, Edge { method: WALK });
+        graph.add_edge(p2_index, p1_index, Edge { method: WALK });
     }
 
     // TODO: Debug, remove
@@ -359,7 +390,6 @@ fn prepare_walkable_vec(map: &GMap, geometry: &GGeometry, width: i32, height: i3
         let mut stack: Vec<(i32, i32)> = Vec::new();
         stack.push((y, x));
         while stack.len() > 0 {
-            // log("working");
             let (y, mut x) = stack.pop().unwrap();
             while x >= 0 && walkable[(y * width + x) as usize] == UNKNOWN {
                 x -= 1;
@@ -411,6 +441,8 @@ pub fn prepare(g_js: JsValue) {
         // Make the grid
         prepare_map(&g, map_name);
     }
+
+    // TODO: Debug, remove
     log(&format!(
         "Prepared all maps in {}ms!",
         start.elapsed().as_millis()

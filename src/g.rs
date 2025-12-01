@@ -140,21 +140,27 @@ pub struct GMap {
     pub doors: Vec<GDoor>,
     pub ignore: Option<bool>,
     pub name: String,
-    pub npcs: Option<Vec<GNpc>>,
+    pub npcs: Option<Vec<GMapNpc>>,
     #[serde(deserialize_with = "deserialize_spawns")]
     pub spawns: Vec<GSpawn>,
 }
 
 #[derive(Deserialize, Debug)]
-pub struct GNpc {
+pub struct GMapNpc {
     pub id: String,
     pub position: Option<Vec<f32>>,
     pub positions: Option<Vec<Vec<f32>>>,
 }
 
 #[derive(Deserialize, Debug)]
+pub struct GNpc {
+    pub places: Option<HashMap<String, u8>>,
+}
+
+#[derive(Deserialize, Debug)]
 pub struct GData {
     pub geometry: HashMap<String, GGeometry>,
     pub maps: HashMap<String, GMap>,
+    pub npcs: HashMap<String, GNpc>,
     pub version: u32,
 }
