@@ -619,29 +619,54 @@ pub fn get_path(
             // path is Vec<NodeIndex>
             serialize_path(&graph, path)
         }
-        None => JsValue::NULL,  // No path found
+        None => JsValue::NULL, // No path found
     }
 }
 
 fn serialize_path(graph: &Graph<Node, Edge>, path: Vec<NodeIndex>) -> JsValue {
     use serde::Serialize;
-    
+
     #[derive(Serialize)]
     struct PathNode {
         map: String,
         x: f32,
         y: f32,
+        method: &'static str,
     }
-    
-    let path_nodes: Vec<PathNode> = path.iter().map(|&idx| {
-        let node = &graph[idx];
-        PathNode {
-            map: get_map_name(node.map_id as u32).unwrap_or_default(),
-            x: node.point.x,
-            y: node.point.y,
-        }
-    }).collect();
-    
+
+    let path_nodes: Vec<PathNode> = path
+        .iter()
+        .enumerate()
+        .map(|(i, &idx)| {
+            let node = &graph[idx];
+
+            // Get the method from the edge leading TO this node
+            let method = if i > 0 {
+                graph
+                    .find_edge(path[i - 1], idx)
+                    .and_then(|edge_idx| graph.edge_weight(edge_idx))
+                    .map(|edge| edge.method)
+                    .unwrap_or(WALK) // Fallback to WALK if edge not found
+            } else {
+                WALK // First node always uses WALK
+            };
+
+            PathNode {
+                map: get_map_name(node.map_id as u32).unwrap(),
+                x: node.point.x,
+                y: node.point.y,
+                method: match method {
+                    WALK => "move",
+                    TOWN => "town",
+                    DOOR => "door",
+                    TRANSPORT => "transport",
+                    ENTER => "enter",
+                    _ => "unknown",
+                },
+            }
+        })
+        .collect();
+
     serde_wasm_bindgen::to_value(&path_nodes).unwrap()
 }
 
