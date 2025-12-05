@@ -378,7 +378,28 @@ pub fn prepare_map(g: &GData, map_name: &String) {
         }
     }
 
-    // TODO: Add edges to town spawn
+    // Add edges to town spawn
+    let town_spawn = map.spawns.get(0).unwrap();
+    let town_spawn_point = triangulation
+        .nearest_neighbor(Point2 {
+            x: town_spawn.x,
+            y: town_spawn.y,
+        })
+        .unwrap();
+    let &town_spawn_index = NODE_MAP
+        .read()
+        .unwrap()
+        .get(town_spawn_point.data())
+        .unwrap();
+    for vertice in triangulation.vertices() {
+        let &node_index = NODE_MAP.read().unwrap().get(vertice.data()).unwrap();
+        if node_index == town_spawn_index {
+            continue;
+        }
+
+        let mut graph = GRAPH.write().unwrap();
+        graph.add_edge(node_index, town_spawn_index, Edge { method: TOWN });
+    }
 
     // Add all nodes to graph
     for edge in triangulation.undirected_edges() {
@@ -395,9 +416,6 @@ pub fn prepare_map(g: &GData, map_name: &String) {
         ) {
             continue;
         }
-
-        // TODO: Calculate cost taking speed in to account when using A*
-        // let cost = edge.length_2().sqrt();
 
         let p1_index = get_or_add_node(&p1_data);
         let p2_index = get_or_add_node(&p2_data);
@@ -591,12 +609,12 @@ pub fn get_path(
 
                 let dx = target.point.x - source.point.x;
                 let dy = target.point.y - source.point.y;
-                (dx * dx + dy * dy).sqrt().round()
+                (dx * dx + dy * dy).sqrt() / base_speed
             }
-            TRANSPORT => 3200.0,
-            TOWN => 812.0,
-            DOOR => 812.0,
-            ENTER => 812.0,
+            TRANSPORT => 3.2, // 3.2s penalty_cd
+            TOWN => 3.812, // 3s for channel + 812ms penalty_cd
+            DOOR => 0.812, // 812ms penalty_cd
+            ENTER => 0.812, // 812ms penalty_cd
             _ => 0.0,
         },
         |node| {
@@ -609,7 +627,7 @@ pub fn get_path(
 
             let dx = goal.point.x - current.point.x;
             let dy = goal.point.y - current.point.y;
-            return ((dx * dx + dy * dy).sqrt() / base_speed).round();
+            return (dx * dx + dy * dy).sqrt() / base_speed;
         },
     );
 
