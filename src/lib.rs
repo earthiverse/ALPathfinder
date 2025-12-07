@@ -376,6 +376,29 @@ pub fn prepare_map(g: &GData, map_name: &String) {
         }
     }
 
+    // Add edges to town spawn
+    let town_spawn = map.spawns.get(0).unwrap();
+    let town_spawn_point = triangulation
+        .nearest_neighbor(Point2 {
+            x: town_spawn.x,
+            y: town_spawn.y,
+        })
+        .unwrap();
+    let &town_spawn_index = NODE_MAP
+        .read()
+        .unwrap()
+        .get(town_spawn_point.data())
+        .unwrap();
+    for vertice in triangulation.vertices() {
+        let &node_index = NODE_MAP.read().unwrap().get(vertice.data()).unwrap();
+        if node_index == town_spawn_index {
+            continue;
+        }
+
+        let mut graph = GRAPH.write().unwrap();
+        graph.add_edge(node_index, town_spawn_index, Edge { method: TOWN });
+    }
+
     // Add all nodes to graph
     for edge in triangulation.undirected_edges() {
         let [p1, p2] = edge.vertices();
