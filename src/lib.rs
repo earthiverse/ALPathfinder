@@ -138,6 +138,52 @@ fn get_map_name(map_id: u32) -> Option<String> {
     names.get(map_id as usize).cloned()
 }
 
+fn find_closest_node(
+    graph: &Graph<Node, Edge>,
+    map_name: &str,
+    x: f32,
+    y: f32,
+) -> Option<NodeIndex> {
+    let target_map_id = {
+        let indices = MAP_INDICES.read().unwrap();
+        match indices.get(map_name) {
+            Some(&id) => id,
+            None => return None,
+        }
+    };
+    let mut closest_index: Option<NodeIndex> = None;
+    let mut min_distance = f32::MAX;
+
+    for node_index in graph.node_indices() {
+        let node = &graph[node_index];
+        if node.map_id != target_map_id {
+            continue;
+        }
+
+        let dx = node.point.x - x;
+        let dy = node.point.y - y;
+        let distance = dx * dx + dy * dy;
+
+        if distance < min_distance
+            && can_walk_path(
+                map_name,
+                node.point.x.trunc() as i32,
+                node.point.y.trunc() as i32,
+                x.trunc() as i32,
+                y.trunc() as i32,
+            )
+        {
+            min_distance = distance;
+            closest_index = Some(node_index);
+        }
+        if distance <= 1.0 {
+            return closest_index;
+        }
+    }
+
+    return closest_index;
+}
+
 pub fn prepare_map(g: &GData, map_name: &String) {
     // Get the data
     let map = g.maps.get(map_name).unwrap();
@@ -346,9 +392,6 @@ pub fn prepare_map(g: &GData, map_name: &String) {
             continue;
         }
 
-        // TODO: Calculate cost taking speed in to account when using A*
-        // let cost = edge.length_2().sqrt();
-
         let p1_index = get_or_add_node(&p1_data);
         let p2_index = get_or_add_node(&p2_data);
 
@@ -357,15 +400,6 @@ pub fn prepare_map(g: &GData, map_name: &String) {
         graph.add_edge(p1_index, p2_index, Edge { method: WALK });
         graph.add_edge(p2_index, p1_index, Edge { method: WALK });
     }
-
-    // TODO: Debug, remove
-    let graph = GRAPH.read().unwrap();
-    log(&format!(
-        "{} processed. Graph now has {} nodes and {} edges.",
-        map_name,
-        graph.node_count(),
-        graph.edge_count()
-    ))
 }
 
 fn prepare_walkable_vec(map: &GMap, geometry: &GGeometry, width: i32, height: i32) -> Vec<u8> {
@@ -473,12 +507,6 @@ pub fn prepare(g_js: JsValue) {
         // Make the grid
         prepare_map(&g, map_name);
     }
-
-    // TODO: Debug, remove
-    log(&format!(
-        "Prepared all maps in {}ms!",
-        start.elapsed().as_millis()
-    ))
 }
 
 #[wasm_bindgen]
