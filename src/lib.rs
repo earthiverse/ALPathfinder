@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen::JsValue;
-use web_time::Instant;
 
 mod g;
 use crate::g::*;
@@ -523,7 +522,6 @@ pub fn prepare(g_js: JsValue) {
     // Convert 'G' to a variable we can use
     let g: GData = from_value(g_js).unwrap();
 
-    let start = Instant::now();
     for (map_name, map) in &g.maps {
         if map.ignore.is_some() {
             continue; // Skip ignored maps
@@ -534,8 +532,12 @@ pub fn prepare(g_js: JsValue) {
     }
 }
 
-#[wasm_bindgen]
-pub fn is_walkable(map_name: &str, x_i: i32, y_i: i32) -> bool {
+#[wasm_bindgen(js_name = isWalkable)]
+pub fn is_walkable(
+    map_name: &str,
+    x_i: i32,
+    y_i: i32,
+) -> bool {
     let grids = GRIDS.read().unwrap();
     let grid = match grids.get(map_name) {
         Some(g) => g,
@@ -556,7 +558,7 @@ pub fn is_walkable(map_name: &str, x_i: i32, y_i: i32) -> bool {
         .unwrap_or(false);
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = getPath)]
 pub fn get_path(
     map_from_name: &str,
     // TODO: Add instance
@@ -597,9 +599,9 @@ pub fn get_path(
                 (dx * dx + dy * dy).sqrt() / base_speed
             }
             TRANSPORT => 3.2, // 3.2s penalty_cd
-            TOWN => 3.812, // 3s for channel + 812ms penalty_cd
-            DOOR => 0.812, // 812ms penalty_cd
-            ENTER => 0.812, // 812ms penalty_cd
+            TOWN => 3.812,    // 3s for channel + 812ms penalty_cd
+            DOOR => 0.812,    // 812ms penalty_cd
+            ENTER => 0.812,   // 812ms penalty_cd
             _ => 0.0,
         },
         |node| {
@@ -673,7 +675,7 @@ fn serialize_path(graph: &Graph<Node, Edge>, path: Vec<NodeIndex>) -> JsValue {
     serde_wasm_bindgen::to_value(&path_nodes).unwrap()
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = canWalkPath)]
 pub fn can_walk_path(map_name: &str, x1: i32, y1: i32, x2: i32, y2: i32) -> bool {
     let grids = GRIDS.read().unwrap();
     let grid = match grids.get(map_name) {
