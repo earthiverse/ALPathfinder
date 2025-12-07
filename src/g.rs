@@ -10,6 +10,7 @@ pub struct GDoor {
     pub map_to: String,
     pub spawn_to: u8,
     pub spawn_from: u8,
+    // TODO: We need the key in order to know if we need to use `enter`
 }
 
 impl<'de> Deserialize<'de> for GDoor {

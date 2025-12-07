@@ -1,7 +1,9 @@
 use bit_vec::BitVec;
 use core::cmp::{max, min};
 use once_cell::sync::Lazy;
+use petgraph::algo::astar;
 use petgraph::graph::{Graph, NodeIndex};
+use petgraph::visit::EdgeRef;
 use serde_wasm_bindgen::from_value;
 use spade::{DelaunayTriangulation, FloatTriangulation, HasPosition, Point2, Triangulation};
 use std::collections::HashMap;
@@ -552,6 +554,123 @@ pub fn is_walkable(map_name: &str, x_i: i32, y_i: i32) -> bool {
         .data
         .get((y * grid.width + x) as usize)
         .unwrap_or(false);
+}
+
+#[wasm_bindgen]
+pub fn get_path(
+    map_from_name: &str,
+    // TODO: Add instance
+    x_from: f32,
+    y_from: f32,
+    map_to_name: &str,
+    // TODO: Add instance
+    x_to: f32,
+    y_to: f32,
+    speed: Option<f32>,
+) -> JsValue {
+    let base_speed = speed.unwrap_or(50.0);
+
+    let graph = GRAPH.read().unwrap();
+
+    // Find closest existing nodes
+    let start_node = match find_closest_node(&graph, map_from_name, x_from, y_from) {
+        Some(node) => node,
+        None => return JsValue::NULL,
+    };
+    let end_node = match find_closest_node(&graph, map_to_name, x_to, y_to) {
+        Some(node) => node,
+        None => return JsValue::NULL,
+    };
+
+    // A* pathfinding
+    let result = astar(
+        &*graph,
+        start_node,
+        |node| node == end_node, // goal condition
+        |edge| match edge.weight().method {
+            WALK => {
+                let source = &graph[edge.source()];
+                let target = &graph[edge.target()];
+
+                let dx = target.point.x - source.point.x;
+                let dy = target.point.y - source.point.y;
+                (dx * dx + dy * dy).sqrt() / base_speed
+            }
+            TRANSPORT => 3.2, // 3.2s penalty_cd
+            TOWN => 3.812, // 3s for channel + 812ms penalty_cd
+            DOOR => 0.812, // 812ms penalty_cd
+            ENTER => 0.812, // 812ms penalty_cd
+            _ => 0.0,
+        },
+        |node| {
+            let current = &graph[node];
+            let goal = &graph[end_node];
+
+            if current.map_id != goal.map_id {
+                return 100_000.0; // We need to get to another map
+            }
+
+            let dx = goal.point.x - current.point.x;
+            let dy = goal.point.y - current.point.y;
+            return (dx * dx + dy * dy).sqrt() / base_speed;
+        },
+    );
+
+    match result {
+        Some((_cost, path)) => {
+            // Convert path to something you can return to JS
+            // path is Vec<NodeIndex>
+            serialize_path(&graph, path)
+        }
+        None => JsValue::NULL, // No path found
+    }
+}
+
+fn serialize_path(graph: &Graph<Node, Edge>, path: Vec<NodeIndex>) -> JsValue {
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    struct PathNode {
+        map: String,
+        x: f32,
+        y: f32,
+        method: &'static str,
+    }
+
+    let path_nodes: Vec<PathNode> = path
+        .iter()
+        .enumerate()
+        .map(|(i, &idx)| {
+            let node = &graph[idx];
+
+            // Get the method from the edge leading TO this node
+            let method = if i > 0 {
+                graph
+                    .find_edge(path[i - 1], idx)
+                    .and_then(|edge_idx| graph.edge_weight(edge_idx))
+                    .map(|edge| edge.method)
+                    .unwrap_or(WALK) // Fallback to WALK if edge not found
+            } else {
+                WALK // First node always uses WALK
+            };
+
+            PathNode {
+                map: get_map_name(node.map_id as u32).unwrap(),
+                x: node.point.x,
+                y: node.point.y,
+                method: match method {
+                    WALK => "move",
+                    TOWN => "town",
+                    DOOR => "door",
+                    TRANSPORT => "transport",
+                    ENTER => "enter",
+                    _ => "unknown",
+                },
+            }
+        })
+        .collect();
+
+    serde_wasm_bindgen::to_value(&path_nodes).unwrap()
 }
 
 #[wasm_bindgen]
