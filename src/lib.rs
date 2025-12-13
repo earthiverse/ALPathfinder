@@ -72,6 +72,7 @@ const ENTER: u8 = 16;
 
 struct Edge {
     method: u8,
+    spawn: u8,
 }
 
 const INSIDE_1: u8 = 0b0010_1111;
@@ -300,7 +301,14 @@ pub fn prepare_map(g: &GData, map_name: &String) {
             let handle = triangulation.insert(Node { map_id, point });
             let index = get_or_add_node(triangulation.vertex(handle.unwrap()).data());
             let mut graph = GRAPH.write().unwrap();
-            graph.add_edge(index, destination_node_index, Edge { method: DOOR });
+            graph.add_edge(
+                index,
+                destination_node_index,
+                Edge {
+                    method: DOOR,
+                    spawn: door.spawn_to,
+                },
+            );
         }
     }
 
@@ -311,7 +319,7 @@ pub fn prepare_map(g: &GData, map_name: &String) {
         }
 
         // Make list of transporter destination nodes
-        let mut destination_nodes: Vec<NodeIndex> = Vec::new();
+        let mut destination_nodes: Vec<(NodeIndex, u8)> = Vec::new();
         for (destination_map_name, &destination_spawn_index) in
             g.npcs.get("transporter").unwrap().places.as_ref().unwrap()
         {
@@ -331,7 +339,7 @@ pub fn prepare_map(g: &GData, map_name: &String) {
                 map_id: destination_map_id,
                 point: Point2::new(destination_spawn.x, destination_spawn.y),
             };
-            destination_nodes.push(get_or_add_node(&destination_node));
+            destination_nodes.push((get_or_add_node(&destination_node), destination_spawn_index));
         }
 
         // Add transporter links to other maps
@@ -348,9 +356,16 @@ pub fn prepare_map(g: &GData, map_name: &String) {
                 triangulation.get_vertices_in_circle(Point2 { x, y }, TRANSPORT_RADIUS as f32);
             for n in nearby {
                 let n_index = get_or_add_node(&n.data());
-                for destination_node in &destination_nodes {
+                for (destination_node, spawn) in &destination_nodes {
                     let mut graph = GRAPH.write().unwrap();
-                    graph.add_edge(n_index, *destination_node, Edge { method: TRANSPORT });
+                    graph.add_edge(
+                        n_index,
+                        *destination_node,
+                        Edge {
+                            method: TRANSPORT,
+                            spawn: *spawn,
+                        },
+                    );
                 }
             }
         }
@@ -368,9 +383,16 @@ pub fn prepare_map(g: &GData, map_name: &String) {
                     triangulation.get_vertices_in_circle(Point2 { x, y }, TRANSPORT_RADIUS as f32);
                 for n in nearby {
                     let n_index = get_or_add_node(&n.data());
-                    for destination_node in &destination_nodes {
+                    for (destination_node, spawn) in &destination_nodes {
                         let mut graph = GRAPH.write().unwrap();
-                        graph.add_edge(n_index, *destination_node, Edge { method: TRANSPORT });
+                        graph.add_edge(
+                            n_index,
+                            *destination_node,
+                            Edge {
+                                method: TRANSPORT,
+                                spawn: *spawn,
+                            },
+                        );
                     }
                 }
             }
@@ -397,7 +419,14 @@ pub fn prepare_map(g: &GData, map_name: &String) {
         }
 
         let mut graph = GRAPH.write().unwrap();
-        graph.add_edge(node_index, town_spawn_index, Edge { method: TOWN });
+        graph.add_edge(
+            node_index,
+            town_spawn_index,
+            Edge {
+                method: TOWN,
+                spawn: 0,
+            },
+        );
     }
 
     // Add all nodes to graph
@@ -421,8 +450,22 @@ pub fn prepare_map(g: &GData, map_name: &String) {
 
         // Add the edges
         let mut graph = GRAPH.write().unwrap();
-        graph.add_edge(p1_index, p2_index, Edge { method: WALK });
-        graph.add_edge(p2_index, p1_index, Edge { method: WALK });
+        graph.add_edge(
+            p1_index,
+            p2_index,
+            Edge {
+                method: WALK,
+                spawn: 0,
+            },
+        );
+        graph.add_edge(
+            p2_index,
+            p1_index,
+            Edge {
+                method: WALK,
+                spawn: 0,
+            },
+        );
     }
 }
 
@@ -533,11 +576,7 @@ pub fn prepare(g_js: JsValue) {
 }
 
 #[wasm_bindgen(js_name = isWalkable)]
-pub fn is_walkable(
-    map_name: &str,
-    x_i: i32,
-    y_i: i32,
-) -> bool {
+pub fn is_walkable(map_name: &str, x_i: i32, y_i: i32) -> bool {
     let grids = GRIDS.read().unwrap();
     let grid = match grids.get(map_name) {
         Some(g) => g,
@@ -637,6 +676,8 @@ fn serialize_path(graph: &Graph<Node, Edge>, path: Vec<NodeIndex>) -> JsValue {
         x: f32,
         y: f32,
         method: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        spawn: Option<u8>,
     }
 
     let path_nodes: Vec<PathNode> = path
@@ -646,14 +687,14 @@ fn serialize_path(graph: &Graph<Node, Edge>, path: Vec<NodeIndex>) -> JsValue {
             let node = &graph[idx];
 
             // Get the method from the edge leading TO this node
-            let method = if i > 0 {
+            let (method, spawn) = if i > 0 {
                 graph
                     .find_edge(path[i - 1], idx)
                     .and_then(|edge_idx| graph.edge_weight(edge_idx))
-                    .map(|edge| edge.method)
-                    .unwrap_or(WALK) // Fallback to WALK if edge not found
+                    .map(|edge| (edge.method, edge.spawn))
+                    .unwrap_or((WALK, 0)) // Fallback to WALK if edge not found
             } else {
-                WALK // First node always uses WALK
+                (WALK, 0) // First node always uses WALK
             };
 
             PathNode {
@@ -667,6 +708,10 @@ fn serialize_path(graph: &Graph<Node, Edge>, path: Vec<NodeIndex>) -> JsValue {
                     TRANSPORT => "transport",
                     ENTER => "enter",
                     _ => "unknown",
+                },
+                spawn: match method {
+                    DOOR | TRANSPORT | ENTER => Some(spawn),
+                    _ => None,
                 },
             }
         })
