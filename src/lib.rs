@@ -34,7 +34,8 @@ const UNKNOWN: u8 = 0;
 const NOT_WALKABLE: u8 = 1;
 const WALKABLE: u8 = 2;
 
-const TRANSPORT_RADIUS: u8 = 150;
+const DOOR_RADIUS: f32 = 100.0;
+const TRANSPORT_RADIUS_SQUARED: f32 = 22500.0; // 150^2
 
 #[derive(Debug, Clone)]
 struct Node {
@@ -272,11 +273,17 @@ pub fn prepare_map(g: &GData, map_name: &String) {
         let half_h = door.height * 0.5;
 
         let points = [
+            // Bottom middle
             Point2::new(door.x, door.y),
+            // Corners
+            Point2::new(door.x - half_w, door.y),
+            Point2::new(door.x + half_w, door.y),
+            Point2::new(door.x + half_w, door.y - door.height),
+            Point2::new(door.x - half_w, door.y - door.height),
+            // Mid points
             Point2::new(door.x - half_w, door.y - half_h),
             Point2::new(door.x + half_w, door.y - half_h),
-            Point2::new(door.x + half_w, door.y + half_h),
-            Point2::new(door.x - half_w, door.y + half_h),
+            Point2::new(door.x, door.y - door.height),
         ];
 
         let destination_map_id = get_or_create_map_id(&door.map_to);
@@ -294,6 +301,25 @@ pub fn prepare_map(g: &GData, map_name: &String) {
         let destination_node_index = get_or_add_node(&destination_node);
 
         // Add nodes and edges for doors
+        let nearby = triangulation.get_vertices_in_rectangle(
+            Point2::new(
+                door.x - half_w - DOOR_RADIUS,
+                door.y - door.height - DOOR_RADIUS,
+            ),
+            Point2::new(door.x + half_w + DOOR_RADIUS, door.y + DOOR_RADIUS),
+        );
+        for n in nearby {
+            let n_index = get_or_add_node(&n.data());
+            let mut graph = GRAPH.write().unwrap();
+            graph.add_edge(
+                n_index,
+                destination_node_index,
+                Edge {
+                    method: DOOR,
+                    spawn: door.spawn_to,
+                },
+            );
+        }
         for point in points {
             if !is_walkable(map_name, point.x.trunc() as i32, point.y.trunc() as i32) {
                 continue;
@@ -353,7 +379,7 @@ pub fn prepare_map(g: &GData, map_name: &String) {
             });
 
             let nearby =
-                triangulation.get_vertices_in_circle(Point2 { x, y }, TRANSPORT_RADIUS as f32);
+                triangulation.get_vertices_in_circle(Point2 { x, y }, TRANSPORT_RADIUS_SQUARED);
             for n in nearby {
                 let n_index = get_or_add_node(&n.data());
                 for (destination_node, spawn) in &destination_nodes {
@@ -380,7 +406,7 @@ pub fn prepare_map(g: &GData, map_name: &String) {
                 });
 
                 let nearby =
-                    triangulation.get_vertices_in_circle(Point2 { x, y }, TRANSPORT_RADIUS as f32);
+                    triangulation.get_vertices_in_circle(Point2 { x, y }, TRANSPORT_RADIUS_SQUARED);
                 for n in nearby {
                     let n_index = get_or_add_node(&n.data());
                     for (destination_node, spawn) in &destination_nodes {
