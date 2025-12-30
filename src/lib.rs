@@ -506,11 +506,11 @@ fn prepare_walkable_vec(map: &GMap, geometry: &GGeometry, width: i32, height: i3
         Some(v) => {
             for y_line in v {
                 let y_from = max(0, y_line[0] - geometry.min_y - BASE_VN);
-                let y_to = min(height, y_line[0] - geometry.min_y + BASE_V);
-                for y in y_from..y_to {
+                let y_to = min(height - 1, y_line[0] - geometry.min_y + BASE_V);
+                for y in y_from..=y_to {
                     let x_from = max(0, y_line[1] - geometry.min_x - BASE_H);
-                    let x_to = min(width, y_line[2] - geometry.min_x + BASE_H);
-                    for x in x_from..x_to {
+                    let x_to = min(width - 1, y_line[2] - geometry.min_x + BASE_H);
+                    for x in x_from..=x_to {
                         walkable[(y * width + x) as usize] = NOT_WALKABLE;
                     }
                 }
@@ -524,11 +524,11 @@ fn prepare_walkable_vec(map: &GMap, geometry: &GGeometry, width: i32, height: i3
         Some(v) => {
             for x_line in v {
                 let x_from = max(0, x_line[0] - geometry.min_x - BASE_H);
-                let x_to = min(width, x_line[0] - geometry.min_x + BASE_H);
-                for x in x_from..x_to {
+                let x_to = min(width - 1, x_line[0] - geometry.min_x + BASE_H);
+                for x in x_from..=x_to {
                     let y_from = max(0, x_line[1] - geometry.min_y - BASE_VN);
-                    let y_to = min(height, x_line[2] - geometry.min_y + BASE_V);
-                    for y in y_from..y_to {
+                    let y_to = min(height - 1, x_line[2] - geometry.min_y + BASE_V);
+                    for y in y_from..=y_to {
                         walkable[(y * width + x) as usize] = NOT_WALKABLE;
                     }
                 }
@@ -541,8 +541,8 @@ fn prepare_walkable_vec(map: &GMap, geometry: &GGeometry, width: i32, height: i3
         let x = spawn.x.trunc() as i32 - geometry.min_x;
         let y = spawn.y.trunc() as i32 - geometry.min_y;
 
-        if walkable[(y * width + x) as usize] == WALKABLE {
-            // We've already determined this area is walkable
+        if walkable[(y * width + x) as usize] != UNKNOWN {
+            // We've already determined this area
             continue;
         };
 
