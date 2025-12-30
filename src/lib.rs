@@ -167,18 +167,20 @@ fn find_closest_node(
         let dy = node.point.y - y;
         let distance = dx * dx + dy * dy;
 
-        if distance < min_distance
-            && can_walk_path(
-                map_name,
-                node.point.x.trunc() as i32,
-                node.point.y.trunc() as i32,
-                x.trunc() as i32,
-                y.trunc() as i32,
-            )
-        {
-            min_distance = distance;
-            closest_index = Some(node_index);
+        if distance >= min_distance {
+            continue;
         }
+        if !can_walk_path(
+            map_name,
+            node.point.x.trunc() as i32,
+            node.point.y.trunc() as i32,
+            x.trunc() as i32,
+            y.trunc() as i32,
+        ) {
+            continue;
+        }
+        min_distance = distance;
+        closest_index = Some(node_index);
         if distance <= 1.0 {
             return closest_index;
         }
