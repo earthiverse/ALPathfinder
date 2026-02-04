@@ -1,6 +1,6 @@
 [package]
 name = "alpathfinder"
-version = "0.2.7"
+version = "0.2.8"
 authors = ["Kent Rasmussen <hyprkookeez@gmail.com>"]
 edition = "2021"
 
