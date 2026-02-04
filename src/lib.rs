@@ -36,6 +36,7 @@ const WALKABLE: u8 = 2;
 
 const DOOR_RADIUS: f32 = 100.0;
 const TRANSPORT_RADIUS_SQUARED: f32 = 22500.0; // 150^2
+const BANK_PENALTY: f32 = 120.0; // Deincentivize moving through bank
 
 #[derive(Debug, Clone)]
 struct Node {
@@ -667,8 +668,25 @@ pub fn get_path(
             }
             TRANSPORT => 3.2, // 3.2s penalty_cd
             TOWN => 3.812,    // 3s for channel + 812ms penalty_cd
-            DOOR => 0.812,    // 812ms penalty_cd
-            ENTER => 0.812,   // 812ms penalty_cd
+            DOOR => {
+                let mut cost = 0.812; // 812ms penalty_cd
+
+                // Don't penalize if we're going to or starting from the bank
+                if map_from_name.starts_with("bank") || map_to_name.starts_with("bank") {
+                    return cost;
+                }
+
+                // Penalize walking through the bank
+                let source = &graph[edge.source()];
+                let target = &graph[edge.target()];
+                let source_name = get_map_name(source.map_id as u32).unwrap_or_default();
+                let target_name = get_map_name(target.map_id as u32).unwrap_or_default();
+                if !source_name.starts_with("bank") && target_name.starts_with("bank") {
+                    cost += BANK_PENALTY;
+                }
+                cost
+            }
+            ENTER => 0.812, // 812ms penalty_cd
             _ => 0.0,
         },
         |node| {
