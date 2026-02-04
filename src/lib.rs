@@ -590,12 +590,18 @@ fn prepare_walkable_vec(map: &GMap, geometry: &GGeometry, width: i32, height: i3
 }
 
 #[wasm_bindgen]
-pub fn prepare(g_js: JsValue) {
+pub fn prepare(g_js: JsValue, exclude_maps: Option<JsValue>) {
     // Convert 'G' to a variable we can use
     let g: GData = from_value(g_js).unwrap();
 
+    // Convert excluded maps to a variable we can use
+    let excluded_maps: Vec<String> = match exclude_maps {
+        Some(v) => from_value(v).unwrap_or_default(),
+        None => Vec::new(),
+    };
+
     for (map_name, map) in &g.maps {
-        if map.ignore.is_some() {
+        if map.ignore.is_some() || excluded_maps.contains(map_name) {
             continue; // Skip ignored maps
         }
 
