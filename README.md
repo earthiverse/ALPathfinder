@@ -2,18 +2,53 @@
 
 A Rust/WASM Pathfinder for Adventure.Land.
 
-This project is a work in progress. It currently doesn't work.
+## Usage
 
-## Build
-
-1. Run `wasm-pack build` to build.
-2. Add the following lines to `package.json`:
+1. Run `npm i alpathfinder` to install.
+2. Import the pathfinder
 
 ```js
-  "main": "alpathfinder.js",
-  "type": "module",
+import * as ALPathfinder from "alpathfinder";
 ```
 
-## Use Locally
+3. Prepare the pathfinder with values from `G` and an optional list of maps you wish to ignore.
 
-1. In the node project you want to use the pathfinder, run `npm install alpathfinder@file:../path/to/alpathfinder`.
+```js
+const ignoreMaps = [
+  "abtesting",
+  "bank_b", // NOTE: Don't ignore if you have access
+  "bank_u", // NOTE: Don't ignore if you have access
+  "cgallery",
+  "d2",
+  "d_e",
+  "duelland",
+  "shellsisland",
+  "ship0",
+  "test",
+  "old_bank",
+  "old_main",
+  "original_main",
+  "resort",
+  "resort_e",
+];
+ALPathfinder.prepare(parent.G, ignoreMaps);
+```
+
+4. Use the pathfinder
+
+```js
+ALPathfinder.canWalkPath(character.map, character.x, character.y, 123, 456)
+const path = ALPathfinder.getPath(character.map, character.x, character.y, "spookytown", 0, 0, character.speed);
+pathfinder.isWalkable("main", 200, 20)
+```
+
+## Development
+
+### Build
+
+1. Run `wasm-pack build` to build.
+2. Add `typed-adventureland` as a dependency
+
+### Test
+
+1. After building, install the package by referencing the `pkg` directory that was built `npm i ../path/to/alpathfinder/pkg`.

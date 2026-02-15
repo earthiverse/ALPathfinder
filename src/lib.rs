@@ -14,6 +14,41 @@ use wasm_bindgen::JsValue;
 mod g;
 use crate::g::*;
 
+#[wasm_bindgen(typescript_custom_section)]
+const TS_APPEND_CONTENT: &'static str = r#"
+import type { GData, MapKey } from "typed-adventureland";
+
+export interface PathNode {
+  map: MapKey;
+  x: number;
+  y: number;
+  method: "move" | "town" | "door" | "transport" | "enter" | "unknown";
+  spawn?: number;
+}
+
+export function canWalkPath(
+  map: MapKey,
+  x_from: number,
+  y_from: number,
+  x_to: number,
+  y_to: number,
+): boolean;
+
+export function getPath(
+  map_from: MapKey,
+  x_from: number,
+  y_from: number,
+  map_to: MapKey,
+  x_to: number,
+  y_to: number,
+  /** How fast your character can walk. Setting this to a very high number can also reduce the number of town warps. */
+  speed?: number,
+): PathNode[] | null;
+
+export function isWalkable(map: MapKey, x: number, y: number): boolean;
+
+export function prepare(g: GData, exclude_maps?: MapKey[]): void;"#;
+
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = console)]
@@ -589,7 +624,7 @@ fn prepare_walkable_vec(map: &GMap, geometry: &GGeometry, width: i32, height: i3
     return walkable;
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(skip_typescript)]
 pub fn prepare(g_js: JsValue, exclude_maps: Option<JsValue>) {
     // Convert 'G' to a variable we can use
     let g: GData = from_value(g_js).unwrap();
@@ -610,7 +645,7 @@ pub fn prepare(g_js: JsValue, exclude_maps: Option<JsValue>) {
     }
 }
 
-#[wasm_bindgen(js_name = isWalkable)]
+#[wasm_bindgen(js_name = isWalkable, skip_typescript)]
 pub fn is_walkable(map_name: &str, x_i: i32, y_i: i32) -> bool {
     let grids = GRIDS.read().unwrap();
     let grid = match grids.get(map_name) {
@@ -632,7 +667,7 @@ pub fn is_walkable(map_name: &str, x_i: i32, y_i: i32) -> bool {
         .unwrap_or(false);
 }
 
-#[wasm_bindgen(js_name = getPath)]
+#[wasm_bindgen(js_name = getPath, skip_typescript)]
 pub fn get_path(
     map_from_name: &str,
     // TODO: Add instance
@@ -772,7 +807,7 @@ fn serialize_path(graph: &Graph<Node, Edge>, path: Vec<NodeIndex>) -> JsValue {
     serde_wasm_bindgen::to_value(&path_nodes).unwrap()
 }
 
-#[wasm_bindgen(js_name = canWalkPath)]
+#[wasm_bindgen(js_name = canWalkPath, skip_typescript)]
 pub fn can_walk_path(map_name: &str, x1: i32, y1: i32, x2: i32, y2: i32) -> bool {
     let grids = GRIDS.read().unwrap();
     let grid = match grids.get(map_name) {
