@@ -22,7 +22,7 @@ export interface PathNode {
   map: MapKey;
   x: number;
   y: number;
-  method: "move" | "town" | "door" | "transport" | "enter" | "unknown";
+  method: "move" | "town" | "door" | "transport" | "enter" | "leave" | "unknown";
   spawn?: number;
 }
 
@@ -106,6 +106,7 @@ const TOWN: u8 = 2;
 const DOOR: u8 = 4;
 const TRANSPORT: u8 = 8;
 const ENTER: u8 = 16;
+const LEAVE: u8 = 32;
 
 struct Edge {
     method: u8,
@@ -463,6 +464,30 @@ pub fn prepare_map(g: &GData, map_name: &String) {
         }
     }
 
+    // Add leave logic (leaving sends you to spawn 0 on main)
+    if map_name == "jail" || map_name == "cyberland" {
+        let destination_map_id = get_or_create_map_id("main");
+        let destination_spawn = g.maps.get("main").unwrap().spawns.get(0).unwrap();
+        let destination_node = Node {
+            map_id: destination_map_id,
+            point: Point2::new(destination_spawn.x, destination_spawn.y),
+        };
+        let destination_node_index = get_or_add_node(&destination_node);
+
+        for vertice in triangulation.vertices() {
+            let &node_index = NODE_MAP.read().unwrap().get(vertice.data()).unwrap();
+            let mut graph = GRAPH.write().unwrap();
+            graph.add_edge(
+                node_index,
+                destination_node_index,
+                Edge {
+                    method: LEAVE,
+                    spawn: 0,
+                },
+            );
+        }
+    }
+
     // Add edges to town spawn
     let town_spawn = map.spawns.get(0).unwrap();
     let town_spawn_point = triangulation
@@ -728,6 +753,7 @@ pub fn get_path(
                 cost
             }
             ENTER => 0.812, // 812ms penalty_cd
+            LEAVE => 0.812, // 812ms penalty_cd
             _ => 0.0,
         },
         |node| {
@@ -794,10 +820,11 @@ fn serialize_path(graph: &Graph<Node, Edge>, path: Vec<NodeIndex>) -> JsValue {
                     DOOR => "door",
                     TRANSPORT => "transport",
                     ENTER => "enter",
+                    LEAVE => "leave",
                     _ => "unknown",
                 },
                 spawn: match method {
-                    DOOR | TRANSPORT | ENTER => Some(spawn),
+                    DOOR | TRANSPORT | ENTER | LEAVE => Some(spawn),
                     _ => None,
                 },
             }
