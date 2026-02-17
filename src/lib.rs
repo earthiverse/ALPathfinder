@@ -311,6 +311,8 @@ pub fn prepare_map(g: &GData, map_name: &String) {
         let half_w = door.width * 0.5;
         let half_h = door.height * 0.5;
 
+        let method = if door.requires_key { ENTER } else { DOOR };
+
         let points = [
             // Bottom middle
             Point2::new(door.x, door.y),
@@ -354,7 +356,7 @@ pub fn prepare_map(g: &GData, map_name: &String) {
                 n_index,
                 destination_node_index,
                 Edge {
-                    method: DOOR,
+                    method,
                     spawn: door.spawn_to,
                 },
             );
@@ -370,7 +372,7 @@ pub fn prepare_map(g: &GData, map_name: &String) {
                 index,
                 destination_node_index,
                 Edge {
-                    method: DOOR,
+                    method,
                     spawn: door.spawn_to,
                 },
             );

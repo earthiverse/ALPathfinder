@@ -10,7 +10,7 @@ pub struct GDoor {
     pub map_to: String,
     pub spawn_to: u8,
     pub spawn_from: u8,
-    // TODO: We need the key in order to know if we need to use `enter`
+    pub requires_key: bool,
 }
 
 impl<'de> Deserialize<'de> for GDoor {
@@ -51,6 +51,8 @@ impl<'de> Deserialize<'de> for GDoor {
                     .ok_or_else(|| serde::de::Error::custom("Invalid spawn_from"))?
                     as u8;
 
+                let requires_key = arr.len() > 7 && arr[7].as_str() == Some("key");
+
                 return Ok(GDoor {
                     x,
                     y,
@@ -59,6 +61,7 @@ impl<'de> Deserialize<'de> for GDoor {
                     map_to,
                     spawn_to,
                     spawn_from,
+                    requires_key,
                 });
             }
         }
