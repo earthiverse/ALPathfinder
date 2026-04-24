@@ -1,12 +1,16 @@
-use bit_vec::BitVec;
-use core::cmp::{max, min};
+use clipper2_rust::{ClipType, Clipper64, FillRule, PathType, Paths64, Point};
 use once_cell::sync::Lazy;
 use petgraph::algo::astar;
 use petgraph::graph::{Graph, NodeIndex};
 use petgraph::visit::EdgeRef;
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use serde_wasm_bindgen::from_value;
-use spade::{DelaunayTriangulation, FloatTriangulation, HasPosition, Point2, Triangulation};
-use std::collections::HashMap;
+use spade::handles::{FixedDirectedEdgeHandle, FixedVertexHandle};
+use spade::{
+    ConstrainedDelaunayTriangulation, FloatTriangulation, HasPosition, Point2, Triangulation,
+};
+use std::collections::{HashMap, VecDeque};
+use std::mem;
 use std::sync::RwLock;
 use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen::JsValue;
@@ -55,36 +59,34 @@ extern "C" {
     fn log(s: &str);
 }
 
-struct Grid {
-    width: i32,
-    min_x: i32,
-    min_y: i32,
-    data: BitVec,
+type CDT = ConstrainedDelaunayTriangulation<VertexData, (), EdgeData>;
+
+#[derive(Debug, Clone, Default)]
+struct EdgeData {
+    reachable: bool,
+}
+
+pub struct VertexData {
+    pub point: Point2<f32>,
+    pub node_index: NodeIndex,
 }
 
 const BASE_H: i32 = 8;
 const BASE_V: i32 = 7;
 const BASE_VN: i32 = 2;
-const UNKNOWN: u8 = 0;
-const NOT_WALKABLE: u8 = 1;
-const WALKABLE: u8 = 2;
 
 const DOOR_RADIUS: f32 = 100.0;
 const TRANSPORT_RADIUS_SQUARED: f32 = 22500.0; // 150^2
 const BANK_PENALTY: f32 = 120.0; // Deincentivize moving through bank
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct Node {
-    map_id: u16,
+    map_id: usize,
     point: Point2<f32>,
 }
 
-impl PartialEq for Node {
-    fn eq(&self, other: &Self) -> bool {
-        return self.map_id == other.map_id && self.point == other.point;
-    }
-}
 impl Eq for Node {}
+
 impl std::hash::Hash for Node {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.map_id.hash(state);
@@ -93,89 +95,68 @@ impl std::hash::Hash for Node {
     }
 }
 
-impl HasPosition for Node {
+impl HasPosition for VertexData {
     type Scalar = f32;
-
-    fn position(&self) -> Point2<f32> {
+    fn position(&self) -> Point2<Self::Scalar> {
         self.point
     }
 }
 
-const WALK: u8 = 1;
-const TOWN: u8 = 2;
-const DOOR: u8 = 4;
-const TRANSPORT: u8 = 8;
-const ENTER: u8 = 16;
-const LEAVE: u8 = 32;
-
-struct Edge {
-    method: u8,
-    spawn: u8,
+#[derive(Copy, Clone)]
+enum Edge {
+    WALK,
+    TOWN,
+    DOOR(u8),
+    TRANSPORT(u8),
+    ENTER(u8),
+    LEAVE(u8),
 }
 
-const INSIDE_1: u8 = 0b0010_1111;
-const INSIDE_1_IGNORE: u8 = 0b0010_0100;
-const INSIDE_2: u8 = 0b1001_0111;
-const INSIDE_2_IGNORE: u8 = 0b1000_0001;
-const INSIDE_3: u8 = 0b1111_0100;
-const INSIDE_3_IGNORE: u8 = 0b0010_0100;
-const INSIDE_4: u8 = 0b1110_1001;
-const INSIDE_4_IGNORE: u8 = 0b1000_0001;
-const OUTSIDE_1: u8 = 0b0111_1111;
-const OUTSIDE_2: u8 = 0b1101_1111;
-const OUTSIDE_3: u8 = 0b1111_1011;
-const OUTSIDE_4: u8 = 0b1111_1110;
+static MAP_NAMES: RwLock<Vec<String>> = RwLock::new(Vec::new());
 
-static MAP_INDICES: Lazy<RwLock<HashMap<String, u16>>> = Lazy::new(|| RwLock::new(HashMap::new()));
-static MAP_NAMES: Lazy<RwLock<Vec<String>>> = Lazy::new(|| RwLock::new(Vec::new()));
+static GRAPH: Lazy<RwLock<Graph<Node, Edge>>> = Lazy::new(|| RwLock::new(Graph::new()));
 
-static GRAPH: Lazy<RwLock<Graph<Node, Edge>>> = Lazy::new(|| {
-    let g = Graph::new();
-    return RwLock::new(g);
-});
+static MAP_INDICES: RwLock<FxHashMap<String, usize>> =
+    RwLock::new(HashMap::with_hasher(FxBuildHasher));
 
-static NODE_MAP: Lazy<RwLock<HashMap<Node, NodeIndex>>> = Lazy::new(|| {
-    let m = HashMap::new();
-    return RwLock::new(m);
-});
+static NODE_MAP: RwLock<FxHashMap<Node, NodeIndex>> =
+    RwLock::new(HashMap::with_hasher(FxBuildHasher));
 
-static GRIDS: Lazy<RwLock<HashMap<String, Grid>>> = Lazy::new(|| {
-    let m = HashMap::new();
-    return RwLock::new(m);
-});
+static GRIDS: RwLock<FxHashMap<String, CDT>> = RwLock::new(HashMap::with_hasher(FxBuildHasher));
 
-fn get_or_add_node(node: &Node) -> NodeIndex {
-    let mut node_map = NODE_MAP.write().unwrap();
-
-    if let Some(&index) = node_map.get(&node) {
-        index
-    } else {
-        let mut graph = GRAPH.write().unwrap();
-        let index = graph.add_node(node.clone());
-        node_map.insert(node.clone(), index);
-        index
-    }
+#[wasm_bindgen(skip_typescript)]
+pub fn clear() {
+    MAP_NAMES.write().ok().unwrap().clear();
+    GRAPH.write().ok().unwrap().clear();
+    MAP_INDICES.write().ok().unwrap().clear();
+    NODE_MAP.write().ok().unwrap().clear();
+    GRIDS.write().ok().unwrap().clear();
 }
 
-fn get_or_create_map_id(map_name: &str) -> u16 {
-    let indices = MAP_INDICES.read().unwrap();
-    if let Some(&id) = indices.get(map_name) {
-        return id;
+fn get_or_add_node(node: Node) -> NodeIndex {
+    let mut node_map = NODE_MAP.write().ok().unwrap();
+    *node_map
+        .entry(node.clone())
+        .or_insert_with(|| GRAPH.write().ok().unwrap().add_node(node))
+}
+
+fn get_or_create_map_id(map_name: &str) -> usize {
+    let mut indices = MAP_INDICES.write().ok().unwrap();
+    if let Some(id) = indices.get(map_name) {
+        return *id;
     }
-    drop(indices);
+    let mut names = MAP_NAMES.write().ok().unwrap();
 
-    let mut indices = MAP_INDICES.write().unwrap();
-    let mut names = MAP_NAMES.write().unwrap();
-
-    let id = names.len() as u16;
-    names.push(map_name.to_string());
-    indices.insert(map_name.to_string(), id);
+    let id = names.len();
+    let as_string = map_name.to_string();
+    names.push(as_string.clone());
+    indices.insert(as_string, id);
     return id;
 }
 
-fn get_map_name(map_id: u32) -> Option<String> {
-    let names = MAP_NAMES.read().unwrap();
-    names.get(map_id as usize).cloned()
+fn get_map_name(map_id: usize) -> Option<String> {
+    let names = MAP_NAMES.read().ok().unwrap();
+    names.get(map_id).cloned()
 }
 
 fn find_closest_node(
@@ -184,13 +165,7 @@ fn find_closest_node(
     x: f32,
     y: f32,
 ) -> Option<NodeIndex> {
-    let target_map_id = {
-        let indices = MAP_INDICES.read().unwrap();
-        match indices.get(map_name) {
-            Some(&id) => id,
-            None => return None,
-        }
-    };
+    let target_map_id = *MAP_INDICES.read().ok().unwrap().get(map_name)?;
     let mut closest_index: Option<NodeIndex> = None;
     let mut min_distance = f32::MAX;
 
@@ -226,92 +201,117 @@ fn find_closest_node(
     return closest_index;
 }
 
-pub fn prepare_map(g: &GData, map_name: &String) {
-    // Get the data
-    let map = g.maps.get(map_name).unwrap();
-    let geometry = g.geometry.get(map_name).unwrap();
-    let width = geometry.max_x - geometry.min_x;
-    let height = geometry.max_y - geometry.min_y;
+fn flood_fill_holes(triangulation: &mut CDT, spawn_points: Vec<FixedVertexHandle>) {
+    let mut queue: VecDeque<FixedDirectedEdgeHandle> = VecDeque::new();
 
-    let walkable = prepare_walkable_vec(map, geometry, width, height);
-
-    // Add the grid to the global list
-    let mut grids = GRIDS.write().unwrap();
-    grids.insert(
-        map_name.to_string(),
-        Grid {
-            width,
-            min_x: geometry.min_x,
-            min_y: geometry.min_y,
-            data: walkable.iter().map(|&state| state == WALKABLE).collect(),
-        },
-    );
-    drop(grids);
-
-    let map_id = get_or_create_map_id(map_name);
-    let mut triangulation: DelaunayTriangulation<Node> = DelaunayTriangulation::new();
-
-    // Add nodes at corners
-    for y in 1..(height - 1) {
-        let row_above = (y - 1) * width;
-        let row_current = y * width;
-        let row_below = (y + 1) * width;
-        for x in 1..(width - 1) {
-            let m_c = walkable[(row_current + x) as usize];
-            if m_c != WALKABLE {
-                continue;
-            }
-
-            let u_l = walkable[(row_above + x - 1) as usize];
-            let u_c = walkable[(row_above + x) as usize];
-            let u_r = walkable[(row_above + x + 1) as usize];
-            let m_l = walkable[(row_current + x - 1) as usize];
-            let m_r = walkable[(row_current + x + 1) as usize];
-            let b_l = walkable[(row_below + x - 1) as usize];
-            let b_c = walkable[(row_below + x) as usize];
-            let b_r = walkable[(row_below + x + 1) as usize];
-
-            let mask: u8 = (u_l == WALKABLE) as u8
-                | ((u_c == WALKABLE) as u8) << 1
-                | ((u_r == WALKABLE) as u8) << 2
-                | ((m_l == WALKABLE) as u8) << 3
-                | ((m_r == WALKABLE) as u8) << 4
-                | ((b_l == WALKABLE) as u8) << 5
-                | ((b_c == WALKABLE) as u8) << 6
-                | ((b_r == WALKABLE) as u8) << 7;
-
-            if (mask | INSIDE_1_IGNORE) == INSIDE_1
-                || (mask | INSIDE_2_IGNORE) == INSIDE_2
-                || (mask | INSIDE_3_IGNORE) == INSIDE_3
-                || (mask | INSIDE_4_IGNORE) == INSIDE_4
-                || mask == OUTSIDE_1
-                || mask == OUTSIDE_2
-                || mask == OUTSIDE_3
-                || mask == OUTSIDE_4
-            {
-                let handle = triangulation.insert(Node {
-                    map_id,
-                    point: Point2::new((x + geometry.min_x) as f32, (y + geometry.min_y) as f32),
-                });
-                get_or_add_node(triangulation.vertex(handle.unwrap()).data());
-            }
+    for vertex in spawn_points {
+        for edge in triangulation.vertex(vertex).out_edges() {
+            queue.push_back(edge.fix());
         }
     }
 
-    // Add nodes at spawn points
-    for spawn in &map.spawns {
-        let handle = triangulation.insert(Node {
-            map_id,
-            point: Point2::new(spawn.x, spawn.y),
-        });
-        get_or_add_node(triangulation.vertex(handle.unwrap()).data());
+    while let Some(edge) = queue.pop_front() {
+        let edge = triangulation.directed_edge(edge);
+        if !edge.is_outer_edge() {
+            for edge in [edge.next().fix(), edge.prev().fix()] {
+                let data = &mut triangulation.undirected_edge_data_mut(edge.as_undirected());
+                if mem::replace(&mut data.data_mut().reachable, true) || data.is_constraint_edge() {
+                    continue;
+                }
+
+                queue.push_back(edge.rev());
+            }
+        }
+    }
+}
+
+pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
+    // Get the data
+    let map = g.maps.get(map_name)?;
+    let geometry = g.geometry.get(map_name)?;
+
+    let map_id = get_or_create_map_id(map_name);
+
+    let mut clip = Clipper64::new();
+
+    if let Some(v) = &geometry.y_lines {
+        for &[y, x0, x1] in v {
+            let y_from = (y - BASE_VN - 1) as i64;
+            let y_to = (y + BASE_V + 1) as i64;
+            let x_from = (x0 - BASE_H - 1) as i64;
+            let x_to = (x1 + BASE_H + 1) as i64;
+            clip.base.add_path(
+                &vec![
+                    Point::new(x_from, y_from),
+                    Point::new(x_to, y_from),
+                    Point::new(x_to, y_to),
+                    Point::new(x_from, y_to),
+                ],
+                PathType::Subject,
+                false,
+            );
+        }
     }
 
-    for door in &map.doors {
+    if let Some(v) = &geometry.x_lines {
+        for &[x, y0, y1] in v {
+            let x_from = (x - BASE_H - 1) as i64;
+            let x_to = (x + BASE_H + 1) as i64;
+            let y_from = (y0 - BASE_VN - 1) as i64;
+            let y_to = (y1 + BASE_V + 1) as i64;
+            clip.base.add_path(
+                &vec![
+                    Point::new(x_from, y_from),
+                    Point::new(x_to, y_from),
+                    Point::new(x_to, y_to),
+                    Point::new(x_from, y_to),
+                ],
+                PathType::Subject,
+                false,
+            );
+        }
+    }
+
+    let mut sol = Paths64::new();
+
+    clip.execute(ClipType::Union, FillRule::NonZero, &mut sol, None);
+
+    let mut triangulation: CDT = ConstrainedDelaunayTriangulation::new();
+
+    for path in sol.into_iter() {
+        let _ = triangulation.add_constraint_edges(
+            path.into_iter().map(|point| {
+                let point = Point2::new(point.x as f32, point.y as f32);
+                let node_index = get_or_add_node(Node {
+                    map_id,
+                    point: point.clone(),
+                });
+                VertexData { point, node_index }
+            }),
+            true,
+        );
+    }
+
+    // Add nodes at spawn points
+    let spawns: Vec<FixedVertexHandle> = map
+        .spawns
+        .iter()
+        .map(|&[x, y]| {
+            let point = Point2 { x, y };
+            let node_index = get_or_add_node(Node {
+                map_id,
+                point: point.clone(),
+            });
+            triangulation
+                .insert(VertexData { point, node_index })
+                .ok()
+                .unwrap()
+        })
+        .collect();
+
+    for door in map.doors.iter() {
         let half_w = door.width * 0.5;
         let half_h = door.height * 0.5;
-
-        let method = if door.requires_key { ENTER } else { DOOR };
 
         let points = [
             // Bottom middle
@@ -328,18 +328,16 @@ pub fn prepare_map(g: &GData, map_name: &String) {
         ];
 
         let destination_map_id = get_or_create_map_id(&door.map_to);
-        let destination_spawn = g
+        let &[dsx, dsy] = g
             .maps
-            .get(&door.map_to)
-            .unwrap()
+            .get(&door.map_to)?
             .spawns
-            .get(door.spawn_to as usize)
-            .unwrap();
-        let destination_node = Node {
+            .get(door.spawn_to as usize)?;
+
+        let destination_node_index = get_or_add_node(Node {
             map_id: destination_map_id,
-            point: Point2::new(destination_spawn.x, destination_spawn.y),
-        };
-        let destination_node_index = get_or_add_node(&destination_node);
+            point: Point2::new(dsx, dsy),
+        });
 
         // Add nodes and edges for doors
         let nearby = triangulation.get_vertices_in_rectangle(
@@ -349,33 +347,32 @@ pub fn prepare_map(g: &GData, map_name: &String) {
             ),
             Point2::new(door.x + half_w + DOOR_RADIUS, door.y + DOOR_RADIUS),
         );
+        let edge = if door.requires_key {
+            Edge::ENTER(door.spawn_to)
+        } else {
+            Edge::DOOR(door.spawn_to)
+        };
         for n in nearby {
-            let n_index = get_or_add_node(&n.data());
-            let mut graph = GRAPH.write().unwrap();
-            graph.add_edge(
-                n_index,
-                destination_node_index,
-                Edge {
-                    method,
-                    spawn: door.spawn_to,
-                },
-            );
+            let n_index = n.data().node_index;
+
+            GRAPH
+                .write()
+                .ok()
+                .unwrap()
+                .add_edge(n_index, destination_node_index, edge);
         }
+
         for point in points {
-            if !is_walkable(map_name, point.x.trunc() as i32, point.y.trunc() as i32) {
-                continue;
-            }
-            let handle = triangulation.insert(Node { map_id, point });
-            let index = get_or_add_node(triangulation.vertex(handle.unwrap()).data());
-            let mut graph = GRAPH.write().unwrap();
-            graph.add_edge(
-                index,
-                destination_node_index,
-                Edge {
-                    method,
-                    spawn: door.spawn_to,
-                },
-            );
+            let index = get_or_add_node(Node { map_id, point });
+            let _ = triangulation.insert(VertexData {
+                point,
+                node_index: index.clone(),
+            });
+            GRAPH
+                .write()
+                .ok()
+                .unwrap()
+                .add_edge(index, destination_node_index, edge);
         }
     }
 
@@ -387,78 +384,70 @@ pub fn prepare_map(g: &GData, map_name: &String) {
 
         // Make list of transporter destination nodes
         let mut destination_nodes: Vec<(NodeIndex, u8)> = Vec::new();
-        for (destination_map_name, &destination_spawn_index) in
-            g.npcs.get("transporter").unwrap().places.as_ref().unwrap()
+        for (destination_map_name, destination_spawn_index) in
+            g.npcs.get("transporter")?.places.as_ref().unwrap()
         {
-            if destination_map_name == map_name {
+            let destination_map_id = get_or_create_map_id(destination_map_name);
+            if destination_map_id == map_id {
                 continue; // Can't transport to same map
             }
-            let destination_map_id = get_or_create_map_id(destination_map_name);
-            let destination_spawn = g
+            let &[dsx, dsy] = g
                 .maps
-                .get(destination_map_name)
-                .unwrap()
+                .get(destination_map_name)?
                 .spawns
-                .get(destination_spawn_index as usize)
-                .unwrap();
+                .get(*destination_spawn_index as usize)?;
 
-            let destination_node = Node {
-                map_id: destination_map_id,
-                point: Point2::new(destination_spawn.x, destination_spawn.y),
-            };
-            destination_nodes.push((get_or_add_node(&destination_node), destination_spawn_index));
+            destination_nodes.push((
+                get_or_add_node(Node {
+                    map_id: destination_map_id,
+                    point: Point2::new(dsx, dsy),
+                }),
+                *destination_spawn_index,
+            ));
         }
 
         // Add transporter links to other maps
-        if let Some(pos) = &npc.position {
-            let x = pos[0];
-            let y = pos[1];
-
-            let _ = triangulation.insert(Node {
+        if let &Some([x, y]) = &npc.position {
+            let point = Point2 { x, y };
+            let node_index = get_or_add_node(Node {
                 map_id,
-                point: Point2::new(x, y),
+                point: point.clone(),
+            });
+            let _ = triangulation.insert(VertexData {
+                point: point.clone(),
+                node_index,
             });
 
-            let nearby =
-                triangulation.get_vertices_in_circle(Point2 { x, y }, TRANSPORT_RADIUS_SQUARED);
-            for n in nearby {
-                let n_index = get_or_add_node(&n.data());
+            for n in triangulation.get_vertices_in_circle(point, TRANSPORT_RADIUS_SQUARED) {
+                let n_index = n.data().node_index;
                 for (destination_node, spawn) in &destination_nodes {
-                    let mut graph = GRAPH.write().unwrap();
-                    graph.add_edge(
+                    GRAPH.write().ok().unwrap().add_edge(
                         n_index,
                         *destination_node,
-                        Edge {
-                            method: TRANSPORT,
-                            spawn: *spawn,
-                        },
+                        Edge::TRANSPORT(*spawn),
                     );
                 }
             }
         }
         if let Some(positions) = &npc.positions {
-            for p in positions {
-                let x = p[0];
-                let y = p[1];
-
-                let _ = triangulation.insert(Node {
+            for &[x, y] in positions {
+                let point = Point2 { x, y };
+                let node_index = get_or_add_node(Node {
                     map_id,
-                    point: Point2::new(x, y),
+                    point: point.clone(),
+                });
+                let _ = triangulation.insert(VertexData {
+                    point: point.clone(),
+                    node_index,
                 });
 
-                let nearby =
-                    triangulation.get_vertices_in_circle(Point2 { x, y }, TRANSPORT_RADIUS_SQUARED);
-                for n in nearby {
-                    let n_index = get_or_add_node(&n.data());
+                for n in triangulation.get_vertices_in_circle(point, TRANSPORT_RADIUS_SQUARED) {
+                    let n_index = n.data().node_index;
                     for (destination_node, spawn) in &destination_nodes {
-                        let mut graph = GRAPH.write().unwrap();
-                        graph.add_edge(
+                        GRAPH.write().ok().unwrap().add_edge(
                             n_index,
                             *destination_node,
-                            Edge {
-                                method: TRANSPORT,
-                                spawn: *spawn,
-                            },
+                            Edge::TRANSPORT(*spawn),
                         );
                     }
                 }
@@ -469,192 +458,62 @@ pub fn prepare_map(g: &GData, map_name: &String) {
     // Add leave logic (leaving sends you to spawn 0 on main)
     if map_name == "jail" || map_name == "cyberland" {
         let destination_map_id = get_or_create_map_id("main");
-        let destination_spawn = g.maps.get("main").unwrap().spawns.get(0).unwrap();
-        let destination_node = Node {
+        let &[dsx, dsy] = g.maps.get("main")?.spawns.get(0)?;
+        let destination_node_index = get_or_add_node(Node {
             map_id: destination_map_id,
-            point: Point2::new(destination_spawn.x, destination_spawn.y),
-        };
-        let destination_node_index = get_or_add_node(&destination_node);
-
+            point: Point2::new(dsx, dsy),
+        });
+        let mut graph = GRAPH.write().ok().unwrap();
         for vertice in triangulation.vertices() {
-            let &node_index = NODE_MAP.read().unwrap().get(vertice.data()).unwrap();
-            let mut graph = GRAPH.write().unwrap();
-            graph.add_edge(
-                node_index,
-                destination_node_index,
-                Edge {
-                    method: LEAVE,
-                    spawn: 0,
-                },
-            );
+            let node_index = vertice.data().node_index;
+            graph.add_edge(node_index, destination_node_index, Edge::LEAVE(0));
         }
     }
 
     // Add edges to town spawn
-    let town_spawn = map.spawns.get(0).unwrap();
-    let town_spawn_point = triangulation
-        .nearest_neighbor(Point2 {
-            x: town_spawn.x,
-            y: town_spawn.y,
-        })
-        .unwrap();
-    let &town_spawn_index = NODE_MAP
-        .read()
-        .unwrap()
-        .get(town_spawn_point.data())
-        .unwrap();
+    let town_spawn_index = triangulation.vertex(*spawns.get(0)?).data().node_index;
+
+    let mut graph = GRAPH.write().ok().unwrap();
     for vertice in triangulation.vertices() {
-        let &node_index = NODE_MAP.read().unwrap().get(vertice.data()).unwrap();
+        let node_index = vertice.data().node_index;
         if node_index == town_spawn_index {
             continue;
         }
 
-        let mut graph = GRAPH.write().unwrap();
-        graph.add_edge(
-            node_index,
-            town_spawn_index,
-            Edge {
-                method: TOWN,
-                spawn: 0,
-            },
-        );
+        graph.add_edge(node_index, town_spawn_index, Edge::TOWN);
     }
+
+    flood_fill_holes(&mut triangulation, spawns);
+
+    // Add the grid to the global list
 
     // Add all nodes to graph
     for edge in triangulation.undirected_edges() {
+        if !edge.data().data().reachable {
+            continue;
+        }
+
         let [p1, p2] = edge.vertices();
-        let p1_data = p1.data();
-        let p2_data = p2.data();
 
-        if !can_walk_path(
-            map_name,
-            p1_data.point.x as i32,
-            p1_data.point.y as i32,
-            p2_data.point.x as i32,
-            p2_data.point.y as i32,
-        ) {
-            continue;
-        }
+        let p1_index = p1.data().node_index;
 
-        let p1_index = get_or_add_node(&p1_data);
-        let p2_index = get_or_add_node(&p2_data);
+        let p2_index = p2.data().node_index;
 
-        // Add the edges
-        let mut graph = GRAPH.write().unwrap();
-        graph.add_edge(
-            p1_index,
-            p2_index,
-            Edge {
-                method: WALK,
-                spawn: 0,
-            },
-        );
-        graph.add_edge(
-            p2_index,
-            p1_index,
-            Edge {
-                method: WALK,
-                spawn: 0,
-            },
-        );
+        graph.add_edge(p1_index, p2_index, Edge::WALK);
+        graph.add_edge(p2_index, p1_index, Edge::WALK);
     }
-}
-
-fn prepare_walkable_vec(map: &GMap, geometry: &GGeometry, width: i32, height: i32) -> Vec<u8> {
-    let size: usize = (width * height) as usize;
-
-    let mut walkable = vec![UNKNOWN; size];
-
-    // Make the y-lines non-walkable
-    match &geometry.y_lines {
-        None => {}
-        Some(v) => {
-            for y_line in v {
-                let y_from = max(0, y_line[0] - geometry.min_y - BASE_VN);
-                let y_to = min(height - 1, y_line[0] - geometry.min_y + BASE_V);
-                for y in y_from..=y_to {
-                    let x_from = max(0, y_line[1] - geometry.min_x - BASE_H);
-                    let x_to = min(width - 1, y_line[2] - geometry.min_x + BASE_H);
-                    for x in x_from..=x_to {
-                        walkable[(y * width + x) as usize] = NOT_WALKABLE;
-                    }
-                }
-            }
-        }
-    }
-
-    // Make the x-lines non-walkable
-    match &geometry.x_lines {
-        None => {}
-        Some(v) => {
-            for x_line in v {
-                let x_from = max(0, x_line[0] - geometry.min_x - BASE_H);
-                let x_to = min(width - 1, x_line[0] - geometry.min_x + BASE_H);
-                for x in x_from..=x_to {
-                    let y_from = max(0, x_line[1] - geometry.min_y - BASE_VN);
-                    let y_to = min(height - 1, x_line[2] - geometry.min_y + BASE_V);
-                    for y in y_from..=y_to {
-                        walkable[(y * width + x) as usize] = NOT_WALKABLE;
-                    }
-                }
-            }
-        }
-    }
-
-    // Fill in the walkable areas
-    for spawn in &map.spawns {
-        let x = spawn.x.trunc() as i32 - geometry.min_x;
-        let y = spawn.y.trunc() as i32 - geometry.min_y;
-
-        if walkable[(y * width + x) as usize] != UNKNOWN {
-            // We've already determined this area
-            continue;
-        };
-
-        let mut stack: Vec<(i32, i32)> = Vec::new();
-        stack.push((y, x));
-        while stack.len() > 0 {
-            let (y, mut x) = stack.pop().unwrap();
-            while x >= 0 && walkable[(y * width + x) as usize] == UNKNOWN {
-                x -= 1;
-            }
-            x += 1;
-            let mut span_above = false;
-            let mut span_below = false;
-            while x < width && walkable[(y * width + x) as usize] == UNKNOWN {
-                walkable[(y * width + x) as usize] = WALKABLE;
-                if !span_above && y > 0 && walkable[((y - 1) * width + x) as usize] == UNKNOWN {
-                    stack.push((y - 1, x));
-                    span_above = true;
-                } else if span_above && y > 0 && walkable[((y - 1) * width + x) as usize] != UNKNOWN
-                {
-                    span_above = false;
-                }
-
-                if !span_below
-                    && y < height - 1
-                    && walkable[((y + 1) * width + x) as usize] == UNKNOWN
-                {
-                    stack.push((y + 1, x));
-                    span_below = true;
-                } else if span_below
-                    && y < height - 1
-                    && walkable[((y + 1) * width + x) as usize] != UNKNOWN
-                {
-                    span_below = false;
-                }
-                x += 1;
-            }
-        }
-    }
-
-    return walkable;
+    GRIDS
+        .write()
+        .ok()
+        .unwrap()
+        .insert(map_name.to_string(), triangulation);
+    Some(())
 }
 
 #[wasm_bindgen(skip_typescript)]
 pub fn prepare(g_js: JsValue, exclude_maps: Option<JsValue>) {
     // Convert 'G' to a variable we can use
-    let g: GData = from_value(g_js).unwrap();
+    let g: GData = from_value(g_js).ok().unwrap();
 
     // Convert excluded maps to a variable we can use
     let excluded_maps: Vec<String> = match exclude_maps {
@@ -672,28 +531,6 @@ pub fn prepare(g_js: JsValue, exclude_maps: Option<JsValue>) {
     }
 }
 
-#[wasm_bindgen(js_name = isWalkable, skip_typescript)]
-pub fn is_walkable(map_name: &str, x_i: i32, y_i: i32) -> bool {
-    let grids = GRIDS.read().unwrap();
-    let grid = match grids.get(map_name) {
-        Some(g) => g,
-        None => return false,
-    };
-
-    // Convert the game coordinates to grid coordinates
-    let x = x_i - grid.min_x;
-    let y = y_i - grid.min_y;
-
-    if x < 0 || y < 0 {
-        return false;
-    }
-
-    return grid
-        .data
-        .get((y * grid.width + x) as usize)
-        .unwrap_or(false);
-}
-
 #[wasm_bindgen(js_name = getPath, skip_typescript)]
 pub fn get_path(
     map_from_name: &str,
@@ -708,7 +545,7 @@ pub fn get_path(
 ) -> JsValue {
     let base_speed = speed.unwrap_or(50.0);
 
-    let graph = GRAPH.read().unwrap();
+    let graph = GRAPH.read().ok().unwrap();
 
     // Find closest existing nodes
     let start_node = match find_closest_node(&graph, map_from_name, x_from, y_from) {
@@ -725,8 +562,8 @@ pub fn get_path(
         &*graph,
         start_node,
         |node| node == end_node, // goal condition
-        |edge| match edge.weight().method {
-            WALK => {
+        |edge| match edge.weight() {
+            Edge::WALK => {
                 let source = &graph[edge.source()];
                 let target = &graph[edge.target()];
 
@@ -734,9 +571,9 @@ pub fn get_path(
                 let dy = target.point.y - source.point.y;
                 (dx * dx + dy * dy).sqrt() / base_speed
             }
-            TRANSPORT => 3.2, // 3.2s penalty_cd
-            TOWN => 3.812,    // 3s for channel + 812ms penalty_cd
-            DOOR => {
+            Edge::TRANSPORT(_) => 3.2, // 3.2s penalty_cd
+            Edge::TOWN => 3.812,       // 3s for channel + 812ms penalty_cd
+            Edge::DOOR(_) => {
                 let mut cost = 0.812; // 812ms penalty_cd
 
                 // Don't penalize if we're going to or starting from the bank
@@ -747,16 +584,15 @@ pub fn get_path(
                 // Penalize walking through the bank
                 let source = &graph[edge.source()];
                 let target = &graph[edge.target()];
-                let source_name = get_map_name(source.map_id as u32).unwrap_or_default();
-                let target_name = get_map_name(target.map_id as u32).unwrap_or_default();
+                let source_name = get_map_name(source.map_id).unwrap_or_default();
+                let target_name = get_map_name(target.map_id).unwrap_or_default();
                 if !source_name.starts_with("bank") && target_name.starts_with("bank") {
                     cost += BANK_PENALTY;
                 }
                 cost
             }
-            ENTER => 0.812, // 812ms penalty_cd
-            LEAVE => 0.812, // 812ms penalty_cd
-            _ => 0.0,
+            Edge::ENTER(_) => 0.812, // 812ms penalty_cd
+            Edge::LEAVE(_) => 0.812, // 812ms penalty_cd
         },
         |node| {
             let current = &graph[node];
@@ -802,185 +638,51 @@ fn serialize_path(graph: &Graph<Node, Edge>, path: Vec<NodeIndex>) -> JsValue {
             let node = &graph[idx];
 
             // Get the method from the edge leading TO this node
-            let (method, spawn) = if i > 0 {
+            let edge = if i > 0 {
                 graph
                     .find_edge(path[i - 1], idx)
                     .and_then(|edge_idx| graph.edge_weight(edge_idx))
-                    .map(|edge| (edge.method, edge.spawn))
-                    .unwrap_or((WALK, 0)) // Fallback to WALK if edge not found
+                    .unwrap_or(&Edge::WALK) // Fallback to WALK if edge not found
             } else {
-                (WALK, 0) // First node always uses WALK
+                &Edge::WALK
             };
 
             PathNode {
-                map: get_map_name(node.map_id as u32).unwrap(),
+                map: get_map_name(node.map_id).unwrap(),
                 x: node.point.x,
                 y: node.point.y,
-                method: match method {
-                    WALK => "move",
-                    TOWN => "town",
-                    DOOR => "door",
-                    TRANSPORT => "transport",
-                    ENTER => "enter",
-                    LEAVE => "leave",
-                    _ => "unknown",
+                method: match edge {
+                    Edge::WALK => "move",
+                    Edge::TOWN => "town",
+                    Edge::DOOR(_) => "door",
+                    Edge::TRANSPORT(_) => "transport",
+                    Edge::ENTER(_) => "enter",
+                    Edge::LEAVE(_) => "leave",
                 },
-                spawn: match method {
-                    DOOR | TRANSPORT | ENTER | LEAVE => Some(spawn),
+                spawn: match edge {
+                    Edge::DOOR(spawn)
+                    | Edge::TRANSPORT(spawn)
+                    | Edge::ENTER(spawn)
+                    | Edge::LEAVE(spawn) => Some(*spawn),
                     _ => None,
                 },
             }
         })
         .collect();
 
-    serde_wasm_bindgen::to_value(&path_nodes).unwrap()
+    serde_wasm_bindgen::to_value(&path_nodes).ok().unwrap()
 }
 
 #[wasm_bindgen(js_name = canWalkPath, skip_typescript)]
 pub fn can_walk_path(map_name: &str, x1: i32, y1: i32, x2: i32, y2: i32) -> bool {
-    let grids = GRIDS.read().unwrap();
+    let grids = GRIDS.read().ok().unwrap();
     let grid = match grids.get(map_name) {
         Some(g) => g,
         None => return false,
     };
 
-    let x_step: i32;
-    let y_step: i32;
-    let mut error: i32;
-    let mut error_prev: i32;
-    let mut x: i32 = x1 - grid.min_x;
-    let mut y: i32 = y1 - grid.min_y;
-    let mut dx: i32 = x2 - x1;
-    let mut dy: i32 = y2 - y1;
-
-    if !grid
-        .data
-        .get((y * grid.width + x) as usize)
-        .unwrap_or(false)
-    {
-        return false;
-    }
-
-    if dy < 0 {
-        y_step = -1;
-        dy = -dy;
-    } else {
-        y_step = 1;
-    }
-
-    if dx < 0 {
-        x_step = -1;
-        dx = -dx;
-    } else {
-        x_step = 1;
-    }
-    let ddy = 2 * dy;
-    let ddx = 2 * dx;
-
-    if ddx >= ddy {
-        error_prev = dx;
-        error = dx;
-        for _i in 0..dx {
-            x += x_step;
-            error += ddy;
-            if error > ddx {
-                y += y_step;
-                error -= ddx;
-
-                if error + error_prev < ddx {
-                    if !grid
-                        .data
-                        .get(((y - y_step) * grid.width + x) as usize)
-                        .unwrap_or(false)
-                    {
-                        return false;
-                    }
-                } else if error + error_prev > ddx {
-                    if !grid
-                        .data
-                        .get((y * grid.width + x - x_step) as usize)
-                        .unwrap_or(false)
-                    {
-                        return false;
-                    }
-                } else {
-                    if !grid
-                        .data
-                        .get(((y - y_step) * grid.width + x) as usize)
-                        .unwrap_or(false)
-                    {
-                        return false;
-                    }
-                    if !grid
-                        .data
-                        .get((y * grid.width + x - x_step) as usize)
-                        .unwrap_or(false)
-                    {
-                        return false;
-                    }
-                }
-            }
-            if !grid
-                .data
-                .get((y * grid.width + x) as usize)
-                .unwrap_or(false)
-            {
-                return false;
-            }
-            error_prev = error;
-        }
-    } else {
-        error_prev = dy;
-        error = dy;
-        for _i in 0..dy {
-            y += y_step;
-            error += ddx;
-            if error > ddy {
-                x += x_step;
-                error -= ddy;
-                if error + error_prev < ddy {
-                    if !grid
-                        .data
-                        .get((y * grid.width + x - x_step) as usize)
-                        .unwrap_or(false)
-                    {
-                        return false;
-                    }
-                } else if error + error_prev > ddy {
-                    if !grid
-                        .data
-                        .get(((y - y_step) * grid.width + x) as usize)
-                        .unwrap_or(false)
-                    {
-                        return false;
-                    }
-                } else {
-                    if !grid
-                        .data
-                        .get((y * grid.width + x - x_step) as usize)
-                        .unwrap_or(false)
-                    {
-                        return false;
-                    }
-                    if !grid
-                        .data
-                        .get(((y - y_step) * grid.width + x) as usize)
-                        .unwrap_or(false)
-                    {
-                        return false;
-                    }
-                }
-            }
-            if !grid
-                .data
-                .get((y * grid.width + x) as usize)
-                .unwrap_or(false)
-            {
-                return false;
-            }
-            error_prev = error;
-        }
-    }
-
-    return true;
+    return !grid.intersects_constraint(
+        Point2::new(x1 as f32, y1 as f32),
+        Point2::new(x2 as f32, y2 as f32),
+    );
 }
