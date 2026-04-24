@@ -134,8 +134,8 @@ pub struct GGeometry {
     pub max_x: i32,
     pub min_y: i32,
     pub max_y: i32,
-    pub x_lines: Option<Vec<Vec<i32>>>,
-    pub y_lines: Option<Vec<Vec<i32>>>,
+    pub x_lines: Option<Vec<[i32; 3]>>,
+    pub y_lines: Option<Vec<[i32; 3]>>,
 }
 
 #[derive(Deserialize, Debug)]
