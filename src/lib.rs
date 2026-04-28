@@ -75,7 +75,7 @@ const BASE_H: i32 = 8;
 const BASE_V: i32 = 7;
 const BASE_VN: i32 = 2;
 
-const DOOR_RADIUS: f32 = 100.0;
+const DOOR_RADIUS: f32 = 40.0;
 const TRANSPORT_RADIUS_SQUARED: f32 = 22500.0; // 150^2
 const BANK_PENALTY: f32 = 120.0; // Deincentivize moving through bank
 
@@ -310,21 +310,22 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
         .collect();
 
     for door in map.doors.iter() {
+        let &[spawn_x, spawn_y] = map.spawns.get(door.spawn_from as usize)?;
         let half_w = door.width * 0.5;
         let half_h = door.height * 0.5;
 
         let points = [
             // Bottom middle
-            Point2::new(door.x, door.y),
+            Point2::new(spawn_x, spawn_y),
             // Corners
-            Point2::new(door.x - half_w, door.y),
-            Point2::new(door.x + half_w, door.y),
-            Point2::new(door.x + half_w, door.y - door.height),
-            Point2::new(door.x - half_w, door.y - door.height),
+            Point2::new(spawn_x - half_w, spawn_y),
+            Point2::new(spawn_x + half_w, spawn_y),
+            Point2::new(spawn_x + half_w, spawn_y - door.height),
+            Point2::new(spawn_x - half_w, spawn_y - door.height),
             // Mid points
-            Point2::new(door.x - half_w, door.y - half_h),
-            Point2::new(door.x + half_w, door.y - half_h),
-            Point2::new(door.x, door.y - door.height),
+            Point2::new(spawn_x - half_w, spawn_y - half_h),
+            Point2::new(spawn_x + half_w, spawn_y - half_h),
+            Point2::new(spawn_x, spawn_y - door.height),
         ];
 
         let destination_map_id = get_or_create_map_id(&door.map_to);
@@ -342,10 +343,10 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
         // Add nodes and edges for doors
         let nearby = triangulation.get_vertices_in_rectangle(
             Point2::new(
-                door.x - half_w - DOOR_RADIUS,
+                spawn_x - half_w - DOOR_RADIUS,
                 door.y - door.height - DOOR_RADIUS,
             ),
-            Point2::new(door.x + half_w + DOOR_RADIUS, door.y + DOOR_RADIUS),
+            Point2::new(spawn_x + half_w + DOOR_RADIUS, door.y + DOOR_RADIUS),
         );
         let edge = if door.requires_key {
             Edge::ENTER(door.spawn_to)
@@ -671,6 +672,37 @@ fn serialize_path(graph: &Graph<Node, Edge>, path: Vec<NodeIndex>) -> JsValue {
         .collect();
 
     serde_wasm_bindgen::to_value(&path_nodes).ok().unwrap()
+}
+
+#[wasm_bindgen(js_name = isWalkable, skip_typescript)]
+pub fn is_walkable(map_name: &str, x: f32, y: f32) -> bool {
+    let grids = GRIDS.read().ok().unwrap();
+    let grid = match grids.get(map_name) {
+        Some(g) => g,
+        None => return false,
+    };
+
+    let point = Point2::new(x, y);
+
+    match grid.locate(point) {
+        spade::PositionInTriangulation::OnFace(face) => {
+            grid.face(face).adjacent_edges().iter().any(|e| {
+                grid.undirected_edge(e.fix().as_undirected())
+                    .data()
+                    .data()
+                    .reachable
+            })
+        }
+        spade::PositionInTriangulation::OnEdge(edge) => {
+            grid.undirected_edge(edge.as_undirected())
+                .data()
+                .data()
+                .reachable
+        }
+        spade::PositionInTriangulation::OnVertex(_) => true,
+        spade::PositionInTriangulation::OutsideOfConvexHull(_) => false,
+        spade::PositionInTriangulation::NoTriangulation => false,
+    }
 }
 
 #[wasm_bindgen(js_name = canWalkPath, skip_typescript)]
