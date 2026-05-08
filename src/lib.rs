@@ -4,6 +4,7 @@ use petgraph::algo::astar;
 use petgraph::graph::{Graph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use rustc_hash::{FxBuildHasher, FxHashMap};
+use serde::Serialize;
 use serde_wasm_bindgen::from_value;
 use spade::handles::{FixedDirectedEdgeHandle, FixedVertexHandle};
 use spade::{
@@ -52,6 +53,16 @@ export function getPath(
 export function isWalkable(map: MapKey, x: number, y: number): boolean;
 
 export function prepare(g: GData, exclude_maps?: MapKey[]): void;"#;
+
+#[derive(Serialize)]
+struct PathNode {
+    map: String,
+    x: f32,
+    y: f32,
+    method: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spawn: Option<u8>,
+}
 
 #[wasm_bindgen]
 extern "C" {
@@ -548,6 +559,26 @@ pub fn get_path(
 
     let graph = GRAPH.read().ok().unwrap();
 
+    if map_from_name == map_to_name
+        && can_walk_path(
+            map_from_name,
+            x_from as i32,
+            y_from as i32,
+            x_to as i32,
+            y_to as i32,
+        )
+    {
+        // The path is walkable
+        let path = vec![PathNode {
+            map: map_to_name.to_string(),
+            x: x_to,
+            y: y_to,
+            method: "move",
+            spawn: None,
+        }];
+        return serde_wasm_bindgen::to_value(&path).ok().unwrap();
+    }
+
     // Find closest existing nodes
     let start_node = match find_closest_node(&graph, map_from_name, x_from, y_from) {
         Some(node) => node,
@@ -613,25 +644,59 @@ pub fn get_path(
         Some((_cost, path)) => {
             // Convert path to something you can return to JS
             // path is Vec<NodeIndex>
-            serialize_path(&graph, path, map_to_name, x_to, y_to)
+            serialize_path(&graph, simplify_path(&graph, &path), map_to_name, x_to, y_to)
         }
         None => JsValue::NULL, // No path found
     }
 }
 
-fn serialize_path(graph: &Graph<Node, Edge>, path: Vec<NodeIndex>, map_to_name: &str, x_to: f32, y_to: f32) -> JsValue {
-    use serde::Serialize;
-
-    #[derive(Serialize)]
-    struct PathNode {
-        map: String,
-        x: f32,
-        y: f32,
-        method: &'static str,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        spawn: Option<u8>,
+fn simplify_path(graph: &Graph<Node, Edge>, path: &[NodeIndex]) -> Vec<NodeIndex> {
+    if path.is_empty() {
+        return vec![];
     }
 
+    let mut simplified = vec![path[0]];
+
+    let mut i = 0;
+    while i < path.len() - 1 {
+        // Find the furthest node we can walk to directly from simplified's last node
+        let from = *simplified.last().unwrap();
+        let from_node = &graph[from];
+        let from_map = get_map_name(from_node.map_id).unwrap_or_default();
+
+        let mut furthest = i + 1;
+        for j in (i + 2..path.len()).rev() {
+            let to_node = &graph[path[j]];
+            let to_map = get_map_name(to_node.map_id).unwrap_or_default();
+
+            if from_map == to_map
+                && can_walk_path(
+                    &from_map,
+                    from_node.point.x as i32,
+                    from_node.point.y as i32,
+                    to_node.point.x as i32,
+                    to_node.point.y as i32,
+                )
+            {
+                furthest = j;
+                break;
+            }
+        }
+
+        simplified.push(path[furthest]);
+        i = furthest;
+    }
+
+    simplified
+}
+
+fn serialize_path(
+    graph: &Graph<Node, Edge>,
+    path: Vec<NodeIndex>,
+    map_to_name: &str,
+    x_to: f32,
+    y_to: f32,
+) -> JsValue {
     let mut path_nodes: Vec<PathNode> = path
         .iter()
         .enumerate()
