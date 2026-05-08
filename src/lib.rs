@@ -613,13 +613,13 @@ pub fn get_path(
         Some((_cost, path)) => {
             // Convert path to something you can return to JS
             // path is Vec<NodeIndex>
-            serialize_path(&graph, path)
+            serialize_path(&graph, path, map_to_name, x_to, y_to)
         }
         None => JsValue::NULL, // No path found
     }
 }
 
-fn serialize_path(graph: &Graph<Node, Edge>, path: Vec<NodeIndex>) -> JsValue {
+fn serialize_path(graph: &Graph<Node, Edge>, path: Vec<NodeIndex>, map_to_name: &str, x_to: f32, y_to: f32) -> JsValue {
     use serde::Serialize;
 
     #[derive(Serialize)]
@@ -632,7 +632,7 @@ fn serialize_path(graph: &Graph<Node, Edge>, path: Vec<NodeIndex>) -> JsValue {
         spawn: Option<u8>,
     }
 
-    let path_nodes: Vec<PathNode> = path
+    let mut path_nodes: Vec<PathNode> = path
         .iter()
         .enumerate()
         .map(|(i, &idx)| {
@@ -670,6 +670,15 @@ fn serialize_path(graph: &Graph<Node, Edge>, path: Vec<NodeIndex>) -> JsValue {
             }
         })
         .collect();
+
+    // Add the final node
+    path_nodes.push(PathNode {
+        map: map_to_name.to_string(),
+        x: x_to,
+        y: y_to,
+        method: "move",
+        spawn: None,
+    });
 
     serde_wasm_bindgen::to_value(&path_nodes).ok().unwrap()
 }
