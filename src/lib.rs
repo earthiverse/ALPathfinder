@@ -644,7 +644,13 @@ pub fn get_path(
         Some((_cost, path)) => {
             // Convert path to something you can return to JS
             // path is Vec<NodeIndex>
-            serialize_path(&graph, simplify_path(&graph, &path), map_to_name, x_to, y_to)
+            serialize_path(
+                &graph,
+                simplify_path(&graph, &path),
+                map_to_name,
+                x_to,
+                y_to,
+            )
         }
         None => JsValue::NULL, // No path found
     }
@@ -787,8 +793,32 @@ pub fn can_walk_path(map_name: &str, x1: i32, y1: i32, x2: i32, y2: i32) -> bool
         None => return false,
     };
 
-    return !grid.intersects_constraint(
-        Point2::new(x1 as f32, y1 as f32),
-        Point2::new(x2 as f32, y2 as f32),
-    );
+    if x1 == x2 && y1 == y2 {
+        return is_walkable(map_name, x1 as f32, y1 as f32);
+    }
+
+    let p1 = Point2::new(x1 as f32, y1 as f32);
+    let p2 = Point2::new(x2 as f32, y2 as f32);
+
+    if grid.intersects_constraint(p1, p2) {
+        return false;
+    }
+
+    // TODO: This is probably not optimal
+    // There is an issue if the path is directly aligned along a wall
+    if x1 == x2 {
+        for y in y1.min(y2)..=y1.max(y2) {
+            if !is_walkable(map_name, x1 as f32, y as f32) {
+                return false;
+            }
+        }
+    } else if y1 == y2 {
+        for x in x1.min(x2)..=x1.max(x2) {
+            if !is_walkable(map_name, x as f32, y1 as f32) {
+                return false;
+            }
+        }
+    }
+
+    true
 }
