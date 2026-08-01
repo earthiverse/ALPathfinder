@@ -54,7 +54,7 @@ export function isWalkable(map: MapKey, x: number, y: number): boolean;
 
 export function prepare(g: GData, exclude_maps?: MapKey[]): void;"#;
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct PathNode {
     map: String,
     x: f32,
@@ -642,46 +642,44 @@ pub fn get_path(
 
     match result {
         Some((_cost, path)) => {
-            // Convert path to something you can return to JS
-            // path is Vec<NodeIndex>
-            serialize_path(
+            // Convert path to something we can return for JS
+            serde_wasm_bindgen::to_value(&simplify_path(&build_path(
                 &graph,
-                simplify_path(&graph, &path),
+                &path,
                 map_to_name,
                 x_to,
                 y_to,
-            )
+            )))
+            .ok()
+            .unwrap()
         }
         None => JsValue::NULL, // No path found
     }
 }
 
-fn simplify_path(graph: &Graph<Node, Edge>, path: &[NodeIndex]) -> Vec<NodeIndex> {
+fn simplify_path(path: &[PathNode]) -> Vec<PathNode> {
     if path.is_empty() {
         return vec![];
     }
 
-    let mut simplified = vec![path[0]];
+    let mut simplified = vec![path[0].clone()];
 
     let mut i = 0;
     while i < path.len() - 1 {
         // Find the furthest node we can walk to directly from simplified's last node
-        let from = *simplified.last().unwrap();
-        let from_node = &graph[from];
-        let from_map = get_map_name(from_node.map_id).unwrap_or_default();
+        let from_node = simplified.last().unwrap();
 
         let mut furthest = i + 1;
         for j in (i + 2..path.len()).rev() {
-            let to_node = &graph[path[j]];
-            let to_map = get_map_name(to_node.map_id).unwrap_or_default();
+            let to_node = &path[j];
 
-            if from_map == to_map
+            if from_node.map == to_node.map
                 && can_walk_path(
-                    &from_map,
-                    from_node.point.x as i32,
-                    from_node.point.y as i32,
-                    to_node.point.x as i32,
-                    to_node.point.y as i32,
+                    &from_node.map,
+                    from_node.x as i32,
+                    from_node.y as i32,
+                    to_node.x as i32,
+                    to_node.y as i32,
                 )
             {
                 furthest = j;
@@ -689,20 +687,27 @@ fn simplify_path(graph: &Graph<Node, Edge>, path: &[NodeIndex]) -> Vec<NodeIndex
             }
         }
 
-        simplified.push(path[furthest]);
+        let mut next_node = path[furthest].clone();
+        
+        // If we skipped nodes, we are just moving to this node directly
+        if furthest > i + 1 {
+            next_node.method = "move";
+            next_node.spawn = None;
+        }
+        simplified.push(next_node);
         i = furthest;
     }
 
     simplified
 }
 
-fn serialize_path(
+fn build_path(
     graph: &Graph<Node, Edge>,
-    path: Vec<NodeIndex>,
+    path: &[NodeIndex],
     map_to_name: &str,
     x_to: f32,
     y_to: f32,
-) -> JsValue {
+) -> Vec<PathNode> {
     let mut path_nodes: Vec<PathNode> = path
         .iter()
         .enumerate()
@@ -743,15 +748,20 @@ fn serialize_path(
         .collect();
 
     // Add the final node
-    path_nodes.push(PathNode {
-        map: map_to_name.to_string(),
-        x: x_to,
-        y: y_to,
-        method: "move",
-        spawn: None,
-    });
+    if path_nodes
+        .last()
+        .map_or(true, |n| n.x != x_to || n.y != y_to || n.map != map_to_name)
+    {
+        path_nodes.push(PathNode {
+            map: map_to_name.to_string(),
+            x: x_to,
+            y: y_to,
+            method: "move",
+            spawn: None,
+        });
+    }
 
-    serde_wasm_bindgen::to_value(&path_nodes).ok().unwrap()
+    path_nodes
 }
 
 #[wasm_bindgen(js_name = isWalkable, skip_typescript)]
