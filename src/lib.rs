@@ -814,17 +814,19 @@ pub fn can_walk_path(map_name: &str, x1: i32, y1: i32, x2: i32, y2: i32) -> bool
         return false;
     }
 
-    // TODO: This is probably not optimal
-    // There is an issue if the path is directly aligned along a wall
-    if x1 == x2 {
-        for y in y1.min(y2)..=y1.max(y2) {
-            if !is_walkable(map_name, x1 as f32, y as f32) {
-                return false;
-            }
-        }
-    } else if y1 == y2 {
-        for x in x1.min(x2)..=x1.max(x2) {
-            if !is_walkable(map_name, x as f32, y1 as f32) {
+    // TODO: intersects_constraint doesn't always catch everything
+    let dx = (x2 - x1) as f32;
+    let dy = (y2 - y1) as f32;
+    let dist = (dx * dx + dy * dy).sqrt();
+
+    let step_size = 4.0;
+    if dist > 0.0 {
+        let steps = (dist / step_size).ceil() as usize;
+        for i in 0..=steps {
+            let t = (i as f32) / (steps as f32);
+            let x = x1 as f32 + t * dx;
+            let y = y1 as f32 + t * dy;
+            if !is_walkable(map_name, x, y) {
                 return false;
             }
         }
