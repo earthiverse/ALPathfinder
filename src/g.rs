@@ -82,7 +82,7 @@ where
         .collect())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct GGeometry {
     pub min_x: i32,
     pub max_x: i32,
@@ -92,7 +92,7 @@ pub struct GGeometry {
     pub y_lines: Option<Vec<[i32; 3]>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct GMap {
     #[serde(deserialize_with = "deserialize_doors")]
     pub doors: Vec<GDoor>,
@@ -114,7 +114,7 @@ pub struct GNpc {
     pub places: Option<HashMap<String, u8>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct GData {
     pub geometry: HashMap<String, GGeometry>,
     pub maps: HashMap<String, GMap>,

@@ -16,8 +16,8 @@ use std::sync::RwLock;
 use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen::JsValue;
 
-mod g;
-use crate::g::*;
+pub mod g;
+pub use crate::g::*;
 
 #[wasm_bindgen(typescript_custom_section)]
 const TS_APPEND_CONTENT: &'static str = r#"
@@ -30,6 +30,14 @@ export interface PathNode {
   method: "move" | "town" | "door" | "transport" | "enter" | "leave" | "unknown";
   spawn?: number;
 }
+
+export function addCheatPath(
+  map: MapKey,
+  x_from: number,
+  y_from: number,
+  x_to: number,
+  y_to: number,
+): void;
 
 export function canWalkPath(
   map: MapKey,
@@ -54,14 +62,14 @@ export function isWalkable(map: MapKey, x: number, y: number): boolean;
 
 export function prepare(g: GData, exclude_maps?: MapKey[]): void;"#;
 
-#[derive(Serialize, Clone)]
-struct PathNode {
-    map: String,
-    x: f32,
-    y: f32,
-    method: &'static str,
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct PathNode {
+    pub map: String,
+    pub x: f32,
+    pub y: f32,
+    pub method: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    spawn: Option<u8>,
+    pub spawn: Option<u8>,
 }
 
 #[wasm_bindgen]
@@ -123,6 +131,29 @@ enum Edge {
     LEAVE(u8),
 }
 
+#[derive(Debug, Clone)]
+struct CheatPath {
+    map: String,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+}
+
+static CHEAT_PATHS: Lazy<RwLock<Vec<CheatPath>>> = Lazy::new(|| RwLock::new(Vec::new()));
+
+#[wasm_bindgen(js_name = addCheatPath, skip_typescript)]
+pub fn add_cheat_path(map: &str, x1: f32, y1: f32, x2: f32, y2: f32) {
+    let mut paths = CHEAT_PATHS.write().ok().unwrap();
+    paths.push(CheatPath {
+        map: map.to_string(),
+        x1,
+        y1,
+        x2,
+        y2,
+    });
+}
+
 static MAP_NAMES: RwLock<Vec<String>> = RwLock::new(Vec::new());
 
 static GRAPH: Lazy<RwLock<Graph<Node, Edge>>> = Lazy::new(|| RwLock::new(Graph::new()));
@@ -142,6 +173,7 @@ pub fn clear() {
     MAP_INDICES.write().ok().unwrap().clear();
     NODE_MAP.write().ok().unwrap().clear();
     GRIDS.write().ok().unwrap().clear();
+    CHEAT_PATHS.write().ok().unwrap().clear();
 }
 
 fn get_or_add_node(node: Node) -> NodeIndex {
@@ -389,60 +421,38 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
     }
 
     // Add nodes for transporters
-    for npc in map.npcs.as_ref().unwrap() {
-        if npc.id != "transporter" {
-            continue;
-        }
-
-        // Make list of transporter destination nodes
-        let mut destination_nodes: Vec<(NodeIndex, u8)> = Vec::new();
-        for (destination_map_name, destination_spawn_index) in
-            g.npcs.get("transporter")?.places.as_ref().unwrap()
-        {
-            let destination_map_id = get_or_create_map_id(destination_map_name);
-            if destination_map_id == map_id {
-                continue; // Can't transport to same map
+    if let Some(npcs) = &map.npcs {
+        for npc in npcs.iter() {
+            if npc.id != "transporter" {
+                continue;
             }
-            let &[dsx, dsy] = g
-                .maps
-                .get(destination_map_name)?
-                .spawns
-                .get(*destination_spawn_index as usize)?;
 
-            destination_nodes.push((
-                get_or_add_node(Node {
-                    map_id: destination_map_id,
-                    point: Point2::new(dsx, dsy),
-                }),
-                *destination_spawn_index,
-            ));
-        }
-
-        // Add transporter links to other maps
-        if let &Some([x, y]) = &npc.position {
-            let point = Point2 { x, y };
-            let node_index = get_or_add_node(Node {
-                map_id,
-                point: point.clone(),
-            });
-            let _ = triangulation.insert(VertexData {
-                point: point.clone(),
-                node_index,
-            });
-
-            for n in triangulation.get_vertices_in_circle(point, TRANSPORT_RADIUS_SQUARED) {
-                let n_index = n.data().node_index;
-                for (destination_node, spawn) in &destination_nodes {
-                    GRAPH.write().ok().unwrap().add_edge(
-                        n_index,
-                        *destination_node,
-                        Edge::TRANSPORT(*spawn),
-                    );
+            // Make list of transporter destination nodes
+            let mut destination_nodes: Vec<(NodeIndex, u8)> = Vec::new();
+            for (destination_map_name, destination_spawn_index) in
+                g.npcs.get("transporter")?.places.as_ref().unwrap()
+            {
+                let destination_map_id = get_or_create_map_id(destination_map_name);
+                if destination_map_id == map_id {
+                    continue; // Can't transport to same map
                 }
+                let &[dsx, dsy] = g
+                    .maps
+                    .get(destination_map_name)?
+                    .spawns
+                    .get(*destination_spawn_index as usize)?;
+
+                destination_nodes.push((
+                    get_or_add_node(Node {
+                        map_id: destination_map_id,
+                        point: Point2::new(dsx, dsy),
+                    }),
+                    *destination_spawn_index,
+                ));
             }
-        }
-        if let Some(positions) = &npc.positions {
-            for &[x, y] in positions {
+
+            // Add transporter links to other maps
+            if let &Some([x, y]) = &npc.position {
                 let point = Point2 { x, y };
                 let node_index = get_or_add_node(Node {
                     map_id,
@@ -461,6 +471,30 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
                             *destination_node,
                             Edge::TRANSPORT(*spawn),
                         );
+                    }
+                }
+            }
+            if let Some(positions) = &npc.positions {
+                for &[x, y] in positions {
+                    let point = Point2 { x, y };
+                    let node_index = get_or_add_node(Node {
+                        map_id,
+                        point: point.clone(),
+                    });
+                    let _ = triangulation.insert(VertexData {
+                        point: point.clone(),
+                        node_index,
+                    });
+
+                    for n in triangulation.get_vertices_in_circle(point, TRANSPORT_RADIUS_SQUARED) {
+                        let n_index = n.data().node_index;
+                        for (destination_node, spawn) in &destination_nodes {
+                            GRAPH.write().ok().unwrap().add_edge(
+                                n_index,
+                                *destination_node,
+                                Edge::TRANSPORT(*spawn),
+                            );
+                        }
                     }
                 }
             }
@@ -485,8 +519,38 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
     // Add edges to town spawn
     let town_spawn_index = triangulation.vertex(*spawns.get(0)?).data().node_index;
 
+    flood_fill_holes(&mut triangulation, spawns);
+
+    GRIDS
+        .write()
+        .ok()
+        .unwrap()
+        .insert(map_name.to_string(), triangulation);
+
+    // Pre-calculate cheat path nodes for walkable endpoints before locking graph
+    let cheat_paths = CHEAT_PATHS.read().ok().unwrap();
+    let cheat_edges: Vec<(NodeIndex, NodeIndex)> = cheat_paths
+        .iter()
+        .filter(|cp| {
+            cp.map == *map_name
+                && is_walkable(map_name, cp.x1, cp.y1)
+                && is_walkable(map_name, cp.x2, cp.y2)
+        })
+        .map(|cp| {
+            let node_a = get_or_add_node(Node {
+                map_id,
+                point: Point2::new(cp.x1, cp.y1),
+            });
+            let node_b = get_or_add_node(Node {
+                map_id,
+                point: Point2::new(cp.x2, cp.y2),
+            });
+            (node_a, node_b)
+        })
+        .collect();
+
     let mut graph = GRAPH.write().ok().unwrap();
-    for vertice in triangulation.vertices() {
+    for vertice in GRIDS.read().ok().unwrap().get(map_name).unwrap().vertices() {
         let node_index = vertice.data().node_index;
         if node_index == town_spawn_index {
             continue;
@@ -495,12 +559,15 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
         graph.add_edge(node_index, town_spawn_index, Edge::TOWN);
     }
 
-    flood_fill_holes(&mut triangulation, spawns);
-
-    // Add the grid to the global list
-
     // Add all nodes to graph
-    for edge in triangulation.undirected_edges() {
+    for edge in GRIDS
+        .read()
+        .ok()
+        .unwrap()
+        .get(map_name)
+        .unwrap()
+        .undirected_edges()
+    {
         if !edge.data().data().reachable {
             continue;
         }
@@ -514,11 +581,12 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
         graph.add_edge(p1_index, p2_index, Edge::WALK);
         graph.add_edge(p2_index, p1_index, Edge::WALK);
     }
-    GRIDS
-        .write()
-        .ok()
-        .unwrap()
-        .insert(map_name.to_string(), triangulation);
+
+    // Add cheat path edges directly to graph
+    for (node_a, node_b) in cheat_edges {
+        graph.add_edge(node_a, node_b, Edge::WALK);
+        graph.add_edge(node_b, node_a, Edge::WALK);
+    }
     Some(())
 }
 
@@ -543,8 +611,7 @@ pub fn prepare(g_js: JsValue, exclude_maps: Option<JsValue>) {
     }
 }
 
-#[wasm_bindgen(js_name = getPath, skip_typescript)]
-pub fn get_path(
+pub fn get_path_nodes(
     map_from_name: &str,
     // TODO: Add instance
     x_from: f32,
@@ -554,7 +621,7 @@ pub fn get_path(
     x_to: f32,
     y_to: f32,
     speed: Option<f32>,
-) -> JsValue {
+) -> Option<Vec<PathNode>> {
     let base_speed = speed.unwrap_or(50.0);
 
     let graph = GRAPH.read().ok().unwrap();
@@ -576,17 +643,17 @@ pub fn get_path(
             method: "move",
             spawn: None,
         }];
-        return serde_wasm_bindgen::to_value(&path).ok().unwrap();
+        return Some(path);
     }
 
     // Find closest existing nodes
     let start_node = match find_closest_node(&graph, map_from_name, x_from, y_from) {
         Some(node) => node,
-        None => return JsValue::NULL,
+        None => return None,
     };
     let end_node = match find_closest_node(&graph, map_to_name, x_to, y_to) {
         Some(node) => node,
-        None => return JsValue::NULL,
+        None => return None,
     };
 
     // A* pathfinding
@@ -641,19 +708,40 @@ pub fn get_path(
     );
 
     match result {
-        Some((_cost, path)) => {
-            // Convert path to something we can return for JS
-            serde_wasm_bindgen::to_value(&simplify_path(&build_path(
-                &graph,
-                &path,
-                map_to_name,
-                x_to,
-                y_to,
-            )))
-            .ok()
-            .unwrap()
-        }
-        None => JsValue::NULL, // No path found
+        Some((_cost, path)) => Some(simplify_path(&build_path(
+            &graph,
+            &path,
+            map_to_name,
+            x_to,
+            y_to,
+        ))),
+        None => None, // No path found
+    }
+}
+
+#[wasm_bindgen(js_name = getPath, skip_typescript)]
+pub fn get_path(
+    map_from_name: &str,
+    // TODO: Add instance
+    x_from: f32,
+    y_from: f32,
+    map_to_name: &str,
+    // TODO: Add instance
+    x_to: f32,
+    y_to: f32,
+    speed: Option<f32>,
+) -> JsValue {
+    match get_path_nodes(
+        map_from_name,
+        x_from,
+        y_from,
+        map_to_name,
+        x_to,
+        y_to,
+        speed,
+    ) {
+        Some(path) => serde_wasm_bindgen::to_value(&path).ok().unwrap(),
+        None => JsValue::NULL,
     }
 }
 
@@ -688,7 +776,7 @@ fn simplify_path(path: &[PathNode]) -> Vec<PathNode> {
         }
 
         let mut next_node = path[furthest].clone();
-        
+
         // If we skipped nodes, we are just moving to this node directly
         if furthest > i + 1 {
             next_node.method = "move";
@@ -797,6 +885,25 @@ pub fn is_walkable(map_name: &str, x: f32, y: f32) -> bool {
 
 #[wasm_bindgen(js_name = canWalkPath, skip_typescript)]
 pub fn can_walk_path(map_name: &str, x1: i32, y1: i32, x2: i32, y2: i32) -> bool {
+    let cheat_paths = CHEAT_PATHS.read().ok().unwrap();
+    for cp in cheat_paths.iter() {
+        if cp.map == map_name
+            && is_walkable(map_name, cp.x1, cp.y1)
+            && is_walkable(map_name, cp.x2, cp.y2)
+        {
+            let cx1 = cp.x1.trunc() as i32;
+            let cy1 = cp.y1.trunc() as i32;
+            let cx2 = cp.x2.trunc() as i32;
+            let cy2 = cp.y2.trunc() as i32;
+
+            if (x1 == cx1 && y1 == cy1 && x2 == cx2 && y2 == cy2)
+                || (x1 == cx2 && y1 == cy2 && x2 == cx1 && y2 == cy1)
+            {
+                return true;
+            }
+        }
+    }
+
     let grids = GRIDS.read().ok().unwrap();
     let grid = match grids.get(map_name) {
         Some(g) => g,
