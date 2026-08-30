@@ -10,6 +10,7 @@ pub struct GDoor {
     pub spawn_to: u8,
     pub spawn_from: u8,
     pub requires_key: bool,
+    pub key: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for GDoor {
@@ -51,6 +52,16 @@ impl<'de> Deserialize<'de> for GDoor {
                     as u8;
 
                 let requires_key = arr.len() > 7 && arr[7].as_str() == Some("key");
+                let key = if requires_key {
+                    Some(
+                        arr.get(8)
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| serde::de::Error::custom("Invalid key"))?
+                            .to_string(),
+                    )
+                } else {
+                    None
+                };
 
                 return Ok(GDoor {
                     x,
@@ -61,6 +72,7 @@ impl<'de> Deserialize<'de> for GDoor {
                     spawn_to,
                     spawn_from,
                     requires_key,
+                    key,
                 });
             }
         }

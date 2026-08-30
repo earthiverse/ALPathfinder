@@ -21,7 +21,7 @@ pub use crate::g::*;
 
 #[wasm_bindgen(typescript_custom_section)]
 const TS_APPEND_CONTENT: &'static str = r#"
-import type { GData, MapKey } from "typed-adventureland";
+import type { GData, ItemKey, MapKey } from "typed-adventureland";
 
 export interface PathNode {
   map: MapKey;
@@ -29,6 +29,7 @@ export interface PathNode {
   y: number;
   method: "move" | "town" | "door" | "transport" | "enter" | "leave" | "unknown";
   spawn?: number;
+  key?: ItemKey;
 }
 
 export function addCheatPath(
@@ -70,6 +71,8 @@ pub struct PathNode {
     pub method: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spawn: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 #[wasm_bindgen]
@@ -121,13 +124,13 @@ impl HasPosition for VertexData {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 enum Edge {
     WALK,
     TOWN,
     DOOR(u8),
     TRANSPORT(u8),
-    ENTER(u8),
+    ENTER(u8, Option<String>),
     LEAVE(u8),
 }
 
@@ -392,7 +395,7 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
             Point2::new(spawn_x + half_w + DOOR_RADIUS, door.y + DOOR_RADIUS),
         );
         let edge = if door.requires_key {
-            Edge::ENTER(door.spawn_to)
+            Edge::ENTER(door.spawn_to, door.key.clone())
         } else {
             Edge::DOOR(door.spawn_to)
         };
@@ -403,7 +406,7 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
                 .write()
                 .ok()
                 .unwrap()
-                .add_edge(n_index, destination_node_index, edge);
+                .add_edge(n_index, destination_node_index, edge.clone());
         }
 
         for point in points {
@@ -416,7 +419,7 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
                 .write()
                 .ok()
                 .unwrap()
-                .add_edge(index, destination_node_index, edge);
+                .add_edge(index, destination_node_index, edge.clone());
         }
     }
 
@@ -642,6 +645,7 @@ pub fn get_path_nodes(
             y: y_to,
             method: "move",
             spawn: None,
+            key: None,
         }];
         return Some(path);
     }
@@ -690,7 +694,7 @@ pub fn get_path_nodes(
                 }
                 cost
             }
-            Edge::ENTER(_) => 0.812, // 812ms penalty_cd
+            Edge::ENTER(_, _) => 0.812, // 812ms penalty_cd
             Edge::LEAVE(_) => 0.812, // 812ms penalty_cd
         },
         |node| {
@@ -781,6 +785,7 @@ fn simplify_path(path: &[PathNode]) -> Vec<PathNode> {
         if furthest > i + 1 {
             next_node.method = "move";
             next_node.spawn = None;
+            next_node.key = None;
         }
         simplified.push(next_node);
         i = furthest;
@@ -821,14 +826,18 @@ fn build_path(
                     Edge::TOWN => "town",
                     Edge::DOOR(_) => "door",
                     Edge::TRANSPORT(_) => "transport",
-                    Edge::ENTER(_) => "enter",
+                    Edge::ENTER(_, _) => "enter",
                     Edge::LEAVE(_) => "leave",
                 },
                 spawn: match edge {
                     Edge::DOOR(spawn)
                     | Edge::TRANSPORT(spawn)
-                    | Edge::ENTER(spawn)
+                    | Edge::ENTER(spawn, _)
                     | Edge::LEAVE(spawn) => Some(*spawn),
+                    _ => None,
+                },
+                key: match edge {
+                    Edge::ENTER(_, key) => key.clone(),
                     _ => None,
                 },
             }
@@ -846,6 +855,7 @@ fn build_path(
             y: y_to,
             method: "move",
             spawn: None,
+            key: None,
         });
     }
 
