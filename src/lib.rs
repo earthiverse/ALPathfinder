@@ -178,6 +178,13 @@ pub fn add_cheat_path(map: &str, x1: f32, y1: f32, x2: f32, y2: f32) {
     });
 }
 
+#[derive(Clone, Debug)]
+struct MapExit {
+    point: Point2<f32>,
+    target_map_id: usize,
+    cost: f32,
+}
+
 static MAP_NAMES: RwLock<Vec<String>> = RwLock::new(Vec::new());
 
 static GRAPH: Lazy<RwLock<Graph<Node, Edge>>> = Lazy::new(|| RwLock::new(Graph::new()));
@@ -190,6 +197,12 @@ static NODE_MAP: RwLock<FxHashMap<Node, NodeIndex>> =
 
 static MAP_NODES: RwLock<Vec<Vec<NodeIndex>>> = RwLock::new(Vec::new());
 
+static MAP_EXITS: RwLock<Vec<Vec<MapExit>>> = RwLock::new(Vec::new());
+
+static MAP_DISTANCES: RwLock<Vec<f32>> = RwLock::new(Vec::new());
+
+static TOPOLOGY_DIRTY: RwLock<bool> = RwLock::new(true);
+
 static GRIDS: RwLock<FxHashMap<String, CDT>> = RwLock::new(HashMap::with_hasher(FxBuildHasher));
 
 #[wasm_bindgen(skip_typescript)]
@@ -199,8 +212,79 @@ pub fn clear() {
     *MAP_INDICES.write().ok().unwrap() = HashMap::with_hasher(FxBuildHasher);
     *NODE_MAP.write().ok().unwrap() = HashMap::with_hasher(FxBuildHasher);
     *MAP_NODES.write().ok().unwrap() = Vec::new();
+    *MAP_EXITS.write().ok().unwrap() = Vec::new();
+    *MAP_DISTANCES.write().ok().unwrap() = Vec::new();
+    *TOPOLOGY_DIRTY.write().ok().unwrap() = true;
     *GRIDS.write().ok().unwrap() = HashMap::with_hasher(FxBuildHasher);
     *CHEAT_PATHS.write().ok().unwrap() = Vec::new();
+}
+
+fn add_map_exit(from_map_id: usize, exit: MapExit) {
+    let mut exits = MAP_EXITS.write().ok().unwrap();
+    if exits.len() <= from_map_id {
+        exits.resize(from_map_id + 1, Vec::new());
+    }
+    exits[from_map_id].push(exit);
+    *TOPOLOGY_DIRTY.write().ok().unwrap() = true;
+}
+
+fn ensure_map_topology() {
+    if !*TOPOLOGY_DIRTY.read().ok().unwrap() {
+        return;
+    }
+    let mut dirty = TOPOLOGY_DIRTY.write().ok().unwrap();
+    if !*dirty {
+        return;
+    }
+
+    let map_count = MAP_NAMES.read().ok().unwrap().len();
+    if map_count == 0 {
+        *dirty = false;
+        return;
+    }
+
+    let mut dist = vec![f32::INFINITY; map_count * map_count];
+    for i in 0..map_count {
+        dist[i * map_count + i] = 0.0;
+    }
+
+    let exits = MAP_EXITS.read().ok().unwrap();
+    for (from_map, map_exit_list) in exits.iter().enumerate() {
+        if from_map >= map_count {
+            continue;
+        }
+        for exit in map_exit_list {
+            if exit.target_map_id < map_count {
+                let idx = from_map * map_count + exit.target_map_id;
+                if exit.cost < dist[idx] {
+                    dist[idx] = exit.cost;
+                }
+            }
+        }
+    }
+
+    for k in 0..map_count {
+        for i in 0..map_count {
+            let ik = dist[i * map_count + k];
+            if ik.is_infinite() {
+                continue;
+            }
+            for j in 0..map_count {
+                let kj = dist[k * map_count + j];
+                if kj.is_infinite() {
+                    continue;
+                }
+                let alt = ik + kj;
+                let ij = &mut dist[i * map_count + j];
+                if alt < *ij {
+                    *ij = alt;
+                }
+            }
+        }
+    }
+
+    *MAP_DISTANCES.write().ok().unwrap() = dist;
+    *dirty = false;
 }
 
 fn get_or_add_node(node: Node) -> NodeIndex {
@@ -424,6 +508,19 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
             point: Point2::new(dsx, dsy),
         });
 
+        let mut exit_cost = 0.812;
+        if !map_name.starts_with("bank") && door.map_to.starts_with("bank") {
+            exit_cost += BANK_PENALTY;
+        }
+        add_map_exit(
+            map_id,
+            MapExit {
+                point: Point2::new(spawn_x, spawn_y),
+                target_map_id: destination_map_id,
+                cost: exit_cost,
+            },
+        );
+
         // Add nodes and edges for doors
         let nearby = triangulation.get_vertices_in_rectangle(
             Point2::new(
@@ -504,6 +601,20 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
                     node_index,
                 });
 
+                for (dest_map_name, _) in g.npcs.get("transporter")?.places.as_ref().unwrap() {
+                    let dest_id = get_or_create_map_id(dest_map_name);
+                    if dest_id != map_id {
+                        add_map_exit(
+                            map_id,
+                            MapExit {
+                                point,
+                                target_map_id: dest_id,
+                                cost: 3.2,
+                            },
+                        );
+                    }
+                }
+
                 for n in triangulation.get_vertices_in_circle(point, TRANSPORT_RADIUS_SQUARED) {
                     let n_index = n.data().node_index;
                     for (destination_node, spawn) in &destination_nodes {
@@ -526,6 +637,20 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
                         point: point.clone(),
                         node_index,
                     });
+
+                    for (dest_map_name, _) in g.npcs.get("transporter")?.places.as_ref().unwrap() {
+                        let dest_id = get_or_create_map_id(dest_map_name);
+                        if dest_id != map_id {
+                            add_map_exit(
+                                map_id,
+                                MapExit {
+                                    point,
+                                    target_map_id: dest_id,
+                                    cost: 3.2,
+                                },
+                            );
+                        }
+                    }
 
                     for n in triangulation.get_vertices_in_circle(point, TRANSPORT_RADIUS_SQUARED) {
                         let n_index = n.data().node_index;
@@ -550,6 +675,14 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
             map_id: destination_map_id,
             point: Point2::new(dsx, dsy),
         });
+        add_map_exit(
+            map_id,
+            MapExit {
+                point: Point2::new(0.0, 0.0),
+                target_map_id: destination_map_id,
+                cost: 0.812,
+            },
+        );
         let mut graph = GRAPH.write().ok().unwrap();
         for vertice in triangulation.vertices() {
             let node_index = vertice.data().node_index;
@@ -654,6 +787,8 @@ pub fn prepare(g_js: JsValue, exclude_maps: Option<JsValue>) {
     let mut node_map = NODE_MAP.write().ok().unwrap();
     node_map.clear();
     node_map.shrink_to_fit();
+
+    ensure_map_topology();
 }
 
 pub fn get_path_nodes(
@@ -702,6 +837,33 @@ pub fn get_path_nodes(
         None => return None,
     };
 
+    ensure_map_topology();
+
+    let start_map_id = match MAP_INDICES.read().ok().unwrap().get(map_from_name) {
+        Some(&id) => id,
+        None => return None,
+    };
+    let end_map_id = match MAP_INDICES.read().ok().unwrap().get(map_to_name) {
+        Some(&id) => id,
+        None => return None,
+    };
+
+    let map_count = MAP_NAMES.read().ok().unwrap().len();
+    let map_distances = MAP_DISTANCES.read().ok().unwrap();
+
+    let direct_map_dist = if start_map_id < map_count && end_map_id < map_count {
+        map_distances[start_map_id * map_count + end_map_id]
+    } else {
+        f32::INFINITY
+    };
+
+    if start_map_id != end_map_id && direct_map_dist.is_infinite() {
+        return None;
+    }
+
+    let map_exits = MAP_EXITS.read().ok().unwrap();
+    let map_names = MAP_NAMES.read().ok().unwrap();
+
     // A* pathfinding
     let result = astar(
         &*graph,
@@ -729,9 +891,13 @@ pub fn get_path_nodes(
                 // Penalize walking through the bank
                 let source = &graph[edge.source()];
                 let target = &graph[edge.target()];
-                let source_name = get_map_name(source.map_id).unwrap_or_default();
-                let target_name = get_map_name(target.map_id).unwrap_or_default();
-                if !source_name.starts_with("bank") && target_name.starts_with("bank") {
+                let source_is_bank = map_names
+                    .get(source.map_id)
+                    .map_or(false, |n| n.starts_with("bank"));
+                let target_is_bank = map_names
+                    .get(target.map_id)
+                    .map_or(false, |n| n.starts_with("bank"));
+                if !source_is_bank && target_is_bank {
                     cost += BANK_PENALTY;
                 }
                 cost
@@ -743,13 +909,41 @@ pub fn get_path_nodes(
             let current = &graph[node];
             let goal = &graph[end_node];
 
-            if current.map_id != goal.map_id {
-                return 100_000.0; // We need to get to another map
+            if current.map_id == goal.map_id {
+                let dx = goal.point.x - current.point.x;
+                let dy = goal.point.y - current.point.y;
+                return (dx * dx + dy * dy).sqrt() / base_speed;
             }
 
-            let dx = goal.point.x - current.point.x;
-            let dy = goal.point.y - current.point.y;
-            return (dx * dx + dy * dy).sqrt() / base_speed;
+            let mut min_h = f32::MAX;
+            if let Some(exits) = map_exits.get(current.map_id) {
+                for exit in exits {
+                    if exit.target_map_id < map_count && goal.map_id < map_count {
+                        let rem = map_distances[exit.target_map_id * map_count + goal.map_id];
+                        if !rem.is_infinite() {
+                            let dx = exit.point.x - current.point.x;
+                            let dy = exit.point.y - current.point.y;
+                            let h = (dx * dx + dy * dy).sqrt() / base_speed + exit.cost + rem;
+                            if h < min_h {
+                                min_h = h;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if min_h < f32::MAX {
+                min_h
+            } else if current.map_id < map_count && goal.map_id < map_count {
+                let d = map_distances[current.map_id * map_count + goal.map_id];
+                if d.is_infinite() {
+                    0.0
+                } else {
+                    d
+                }
+            } else {
+                0.0
+            }
         },
     );
 
