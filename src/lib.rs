@@ -192,16 +192,12 @@ static GRIDS: RwLock<FxHashMap<String, CDT>> = RwLock::new(HashMap::with_hasher(
 
 #[wasm_bindgen(skip_typescript)]
 pub fn clear() {
-    MAP_NAMES.write().ok().unwrap().clear();
-    GRAPH.write().ok().unwrap().clear();
-    MAP_INDICES.write().ok().unwrap().clear();
-    {
-        let mut node_map = NODE_MAP.write().ok().unwrap();
-        node_map.clear();
-        node_map.shrink_to_fit();
-    }
-    GRIDS.write().ok().unwrap().clear();
-    CHEAT_PATHS.write().ok().unwrap().clear();
+    *MAP_NAMES.write().ok().unwrap() = Vec::new();
+    *GRAPH.write().ok().unwrap() = Graph::new();
+    *MAP_INDICES.write().ok().unwrap() = HashMap::with_hasher(FxBuildHasher);
+    *NODE_MAP.write().ok().unwrap() = HashMap::with_hasher(FxBuildHasher);
+    *GRIDS.write().ok().unwrap() = HashMap::with_hasher(FxBuildHasher);
+    *CHEAT_PATHS.write().ok().unwrap() = Vec::new();
 }
 
 fn get_or_add_node(node: Node) -> NodeIndex {
