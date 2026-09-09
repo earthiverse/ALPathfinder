@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_wasm_bindgen::from_value;
 use spade::handles::{FixedDirectedEdgeHandle, FixedVertexHandle};
 use spade::{
-    ConstrainedDelaunayTriangulation, FloatTriangulation, HasPosition, Point2, Triangulation,
+    ConstrainedDelaunayTriangulation, FloatTriangulation, Point2, Triangulation,
 };
 use std::collections::{HashMap, VecDeque};
 use std::mem;
@@ -102,16 +102,11 @@ extern "C" {
     fn log(s: &str);
 }
 
-type CDT = ConstrainedDelaunayTriangulation<VertexData, (), EdgeData>;
+type CDT = ConstrainedDelaunayTriangulation<Point2<f32>, (), EdgeData>;
 
 #[derive(Debug, Clone, Default)]
 struct EdgeData {
     reachable: bool,
-}
-
-pub struct VertexData {
-    pub point: Point2<f32>,
-    pub node_index: NodeIndex,
 }
 
 const BASE_H: i32 = 8;
@@ -135,13 +130,6 @@ impl std::hash::Hash for Node {
         self.map_id.hash(state);
         self.point.x.to_bits().hash(state);
         self.point.y.to_bits().hash(state);
-    }
-}
-
-impl HasPosition for VertexData {
-    type Scalar = f32;
-    fn position(&self) -> Point2<Self::Scalar> {
-        self.point
     }
 }
 
@@ -453,11 +441,11 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
         let _ = triangulation.add_constraint_edges(
             path.into_iter().map(|point| {
                 let point = Point2::new(point.x as f32, point.y as f32);
-                let node_index = get_or_add_node(Node {
+                let _ = get_or_add_node(Node {
                     map_id,
-                    point: point.clone(),
+                    point,
                 });
-                VertexData { point, node_index }
+                point
             }),
             true,
         );
@@ -469,12 +457,12 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
         .iter()
         .map(|&[x, y]| {
             let point = Point2 { x, y };
-            let node_index = get_or_add_node(Node {
+            let _ = get_or_add_node(Node {
                 map_id,
-                point: point.clone(),
+                point,
             });
             triangulation
-                .insert(VertexData { point, node_index })
+                .insert(point)
                 .ok()
                 .unwrap()
         })
@@ -538,7 +526,15 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
             Edge::DOOR(door.spawn_to)
         };
         for n in nearby {
-            let n_index = n.data().node_index;
+            let n_index = *NODE_MAP
+                .read()
+                .ok()
+                .unwrap()
+                .get(&Node {
+                    map_id,
+                    point: n.position(),
+                })
+                .unwrap();
 
             GRAPH
                 .write()
@@ -549,10 +545,7 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
 
         for point in points {
             let index = get_or_add_node(Node { map_id, point });
-            let _ = triangulation.insert(VertexData {
-                point,
-                node_index: index.clone(),
-            });
+            let _ = triangulation.insert(point);
             GRAPH
                 .write()
                 .ok()
@@ -595,14 +588,11 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
             // Add transporter links to other maps
             if let &Some([x, y]) = &npc.position {
                 let point = Point2 { x, y };
-                let node_index = get_or_add_node(Node {
+                let _ = get_or_add_node(Node {
                     map_id,
-                    point: point.clone(),
+                    point,
                 });
-                let _ = triangulation.insert(VertexData {
-                    point: point.clone(),
-                    node_index,
-                });
+                let _ = triangulation.insert(point);
 
                 for (dest_map_name, _) in g.npcs.get("transporter")?.places.as_ref().unwrap() {
                     let dest_id = get_or_create_map_id(dest_map_name);
@@ -619,7 +609,15 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
                 }
 
                 for n in triangulation.get_vertices_in_circle(point, TRANSPORT_RADIUS_SQUARED) {
-                    let n_index = n.data().node_index;
+                    let n_index = *NODE_MAP
+                        .read()
+                        .ok()
+                        .unwrap()
+                        .get(&Node {
+                            map_id,
+                            point: n.position(),
+                        })
+                        .unwrap();
                     for (destination_node, spawn) in &destination_nodes {
                         GRAPH.write().ok().unwrap().add_edge(
                             n_index,
@@ -632,14 +630,11 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
             if let Some(positions) = &npc.positions {
                 for &[x, y] in positions {
                     let point = Point2 { x, y };
-                    let node_index = get_or_add_node(Node {
+                    let _ = get_or_add_node(Node {
                         map_id,
-                        point: point.clone(),
+                        point,
                     });
-                    let _ = triangulation.insert(VertexData {
-                        point: point.clone(),
-                        node_index,
-                    });
+                    let _ = triangulation.insert(point);
 
                     for (dest_map_name, _) in g.npcs.get("transporter")?.places.as_ref().unwrap() {
                         let dest_id = get_or_create_map_id(dest_map_name);
@@ -656,7 +651,15 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
                     }
 
                     for n in triangulation.get_vertices_in_circle(point, TRANSPORT_RADIUS_SQUARED) {
-                        let n_index = n.data().node_index;
+                        let n_index = *NODE_MAP
+                            .read()
+                            .ok()
+                            .unwrap()
+                            .get(&Node {
+                                map_id,
+                                point: n.position(),
+                            })
+                            .unwrap();
                         for (destination_node, spawn) in &destination_nodes {
                             GRAPH.write().ok().unwrap().add_edge(
                                 n_index,
@@ -669,6 +672,21 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
             }
         }
     }
+
+    // Precompute vertex handle to NodeIndex mapping before moving triangulation into GRIDS
+    let vertex_node_indices: Vec<NodeIndex> = {
+        let node_map = NODE_MAP.read().ok().unwrap();
+        let mut indices = vec![NodeIndex::new(0); triangulation.num_vertices()];
+        for v in triangulation.vertices() {
+            if let Some(&idx) = node_map.get(&Node {
+                map_id,
+                point: v.position(),
+            }) {
+                indices[v.fix().index()] = idx;
+            }
+        }
+        indices
+    };
 
     // Add leave logic (leaving sends you to spawn 0 on main)
     if map_name == "jail" || map_name == "cyberland" {
@@ -688,17 +706,17 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
         );
         let mut graph = GRAPH.write().ok().unwrap();
         for vertice in triangulation.vertices() {
-            let node_index = vertice.data().node_index;
+            let node_index = vertex_node_indices[vertice.fix().index()];
             graph.add_edge(node_index, destination_node_index, Edge::LEAVE(0));
         }
     }
 
     // Add edges to town spawn
-    let town_spawn_index = triangulation.vertex(*spawns.get(0)?).data().node_index;
+    let town_spawn_index = vertex_node_indices[spawns.get(0)?.index()];
     let secondary_spawn_indices: Vec<NodeIndex> = spawns
         .iter()
         .skip(1)
-        .map(|&s| triangulation.vertex(s).data().node_index)
+        .map(|s| vertex_node_indices[s.index()])
         .collect();
     {
         let mut town_spawns = MAP_TOWN_SPAWNS.write().ok().unwrap();
@@ -761,8 +779,8 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
 
         let [p1, p2] = edge.vertices();
 
-        let p1_index = p1.data().node_index;
-        let p2_index = p2.data().node_index;
+        let p1_index = vertex_node_indices[p1.fix().index()];
+        let p2_index = vertex_node_indices[p2.fix().index()];
 
         let pos1 = p1.position();
         let pos2 = p2.position();
