@@ -4,7 +4,7 @@ use petgraph::algo::astar;
 use petgraph::graph::{Graph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use rustc_hash::{FxBuildHasher, FxHashMap};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_wasm_bindgen::from_value;
 use spade::handles::{FixedDirectedEdgeHandle, FixedVertexHandle};
 use spade::{
@@ -30,6 +30,12 @@ export interface PathNode {
   method: "move" | "town" | "door" | "transport" | "enter" | "leave" | "unknown";
   spawn?: number;
   key?: ItemKey;
+}
+
+export interface SafeWalkPoint {
+  map: MapKey;
+  x: number;
+  y: number;
 }
 
 export function addCheatPath(
@@ -59,9 +65,24 @@ export function getPath(
   speed?: number,
 ): PathNode[] | null;
 
+export function getSafeWalkTo(
+  map: MapKey,
+  x_from: number,
+  y_from: number,
+  x_to: number,
+  y_to: number,
+): SafeWalkPoint | null;
+
 export function isWalkable(map: MapKey, x: number, y: number): boolean;
 
 export function prepare(g: GData, exclude_maps?: MapKey[]): void;"#;
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct SafeWalkPoint {
+    pub map: String,
+    pub x: f32,
+    pub y: f32,
+}
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct PathNode {
@@ -950,4 +971,157 @@ pub fn can_walk_path(map_name: &str, x1: i32, y1: i32, x2: i32, y2: i32) -> bool
     }
 
     true
+}
+
+pub fn get_safe_walk_node(
+    map_name: &str,
+    x_from: f32,
+    y_from: f32,
+    x_to: f32,
+    y_to: f32,
+) -> Option<SafeWalkPoint> {
+    if !is_walkable(map_name, x_from, y_from) {
+        // Starting position is not walkable
+        return None;
+    }
+
+    if x_from == x_to && y_from == y_to {
+        // Same position
+        return Some(SafeWalkPoint {
+            map: map_name.to_string(),
+            x: x_to,
+            y: y_to,
+        });
+    }
+
+    // Check cheat paths, if it overlaps, consider it safe to walk (even though it's not)
+    let cheat_paths = CHEAT_PATHS.read().ok().unwrap();
+    for cp in cheat_paths.iter() {
+        if cp.map == map_name
+            && is_walkable(map_name, cp.x1, cp.y1)
+            && is_walkable(map_name, cp.x2, cp.y2)
+        {
+            let cx1 = cp.x1.trunc() as i32;
+            let cy1 = cp.y1.trunc() as i32;
+            let cx2 = cp.x2.trunc() as i32;
+            let cy2 = cp.y2.trunc() as i32;
+            let x1 = x_from.trunc() as i32;
+            let y1 = y_from.trunc() as i32;
+            let x2 = x_to.trunc() as i32;
+            let y2 = y_to.trunc() as i32;
+
+            if (x1 == cx1 && y1 == cy1 && x2 == cx2 && y2 == cy2)
+                || (x1 == cx2 && y1 == cy2 && x2 == cx1 && y2 == cy1)
+            {
+                return Some(SafeWalkPoint {
+                    map: map_name.to_string(),
+                    x: x_to,
+                    y: y_to,
+                });
+            }
+        }
+    }
+
+    let grids = GRIDS.read().ok().unwrap();
+    let grid = match grids.get(map_name) {
+        Some(g) => g,
+        None => return None,
+    };
+
+    let p1 = Point2::new(x_from, y_from);
+    let p2 = Point2::new(x_to, y_to);
+
+    let dx = x_to - x_from;
+    let dy = y_to - y_from;
+    let dist = (dx * dx + dy * dy).sqrt();
+
+    if dist <= f32::EPSILON {
+        // Essentially the same position
+        return Some(SafeWalkPoint {
+            map: map_name.to_string(),
+            x: x_from,
+            y: y_from,
+        });
+    }
+
+    let direct_blocked = grid.intersects_constraint(p1, p2);
+    if !direct_blocked {
+        // Double-check it's walkable
+        let step_size = 2.0;
+        let steps = (dist / step_size).ceil() as usize;
+        let mut fully_walkable = true;
+        for i in 1..=steps {
+            let t = (i as f32) / (steps as f32);
+            let x = x_from + t * dx;
+            let y = y_from + t * dy;
+            if !is_walkable(map_name, x, y) {
+                fully_walkable = false;
+                break;
+            }
+        }
+        if fully_walkable {
+            return Some(SafeWalkPoint {
+                map: map_name.to_string(),
+                x: x_to,
+                y: y_to,
+            });
+        }
+    }
+
+    let step_size = 2.0;
+    let steps = (dist / step_size).ceil() as usize;
+
+    let mut safe_ratio = 0.0;
+    let mut last_safe_point = p1;
+    let mut blocked_ratio = 1.0;
+
+    for i in 1..=steps {
+        let current_ratio = ((i as f32) * step_size / dist).min(1.0);
+        let current_point = Point2::new(x_from + current_ratio * dx, y_from + current_ratio * dy);
+
+        let blocked = grid.intersects_constraint(last_safe_point, current_point)
+            || !is_walkable(map_name, current_point.x, current_point.y);
+
+        if blocked {
+            blocked_ratio = current_ratio;
+            break;
+        } else {
+            safe_ratio = current_ratio;
+            last_safe_point = current_point;
+        }
+    }
+
+    for _ in 0..12 {
+        let mid_ratio = (safe_ratio + blocked_ratio) * 0.5;
+        let mid_point = Point2::new(x_from + mid_ratio * dx, y_from + mid_ratio * dy);
+
+        if is_walkable(map_name, mid_point.x, mid_point.y)
+            && !grid.intersects_constraint(last_safe_point, mid_point)
+        {
+            safe_ratio = mid_ratio;
+            last_safe_point = mid_point;
+        } else {
+            blocked_ratio = mid_ratio;
+        }
+    }
+
+    Some(SafeWalkPoint {
+        map: map_name.to_string(),
+        x: last_safe_point.x,
+        y: last_safe_point.y,
+    })
+}
+
+#[wasm_bindgen(js_name = getSafeWalkTo, skip_typescript)]
+pub fn get_safe_walk_to(
+    map_name: &str,
+    x_from: f32,
+    y_from: f32,
+    x_to: f32,
+    y_to: f32,
+) -> JsValue {
+    match get_safe_walk_node(map_name, x_from, y_from, x_to, y_to) {
+        Some(point) => serde_wasm_bindgen::to_value(&point).ok().unwrap(),
+        None => JsValue::NULL,
+    }
 }
