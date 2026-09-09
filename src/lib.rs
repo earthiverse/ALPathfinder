@@ -151,7 +151,7 @@ enum Edge {
     TOWN,
     DOOR(u8),
     TRANSPORT(u8),
-    ENTER(u8, Option<String>),
+    ENTER(Box<(u8, Option<String>)>),
     LEAVE(u8),
 }
 
@@ -433,7 +433,7 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
             Point2::new(spawn_x + half_w + DOOR_RADIUS, door.y + DOOR_RADIUS),
         );
         let edge = if door.requires_key {
-            Edge::ENTER(door.spawn_to, door.key.clone())
+            Edge::ENTER(Box::new((door.spawn_to, door.key.clone())))
         } else {
             Edge::DOOR(door.spawn_to)
         };
@@ -736,7 +736,7 @@ pub fn get_path_nodes(
                 }
                 cost
             }
-            Edge::ENTER(_, _) => 0.812, // 812ms penalty_cd
+            Edge::ENTER(_) => 0.812, // 812ms penalty_cd
             Edge::LEAVE(_) => 0.812, // 812ms penalty_cd
         },
         |node| {
@@ -868,18 +868,18 @@ fn build_path(
                     Edge::TOWN => "town",
                     Edge::DOOR(_) => "door",
                     Edge::TRANSPORT(_) => "transport",
-                    Edge::ENTER(_, _) => "enter",
+                    Edge::ENTER(_) => "enter",
                     Edge::LEAVE(_) => "leave",
                 },
                 spawn: match edge {
                     Edge::DOOR(spawn)
                     | Edge::TRANSPORT(spawn)
-                    | Edge::ENTER(spawn, _)
                     | Edge::LEAVE(spawn) => Some(*spawn),
+                    Edge::ENTER(data) => Some(data.0),
                     _ => None,
                 },
                 key: match edge {
-                    Edge::ENTER(_, key) => key.clone(),
+                    Edge::ENTER(data) => data.1.clone(),
                     _ => None,
                 },
             }
