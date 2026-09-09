@@ -195,7 +195,11 @@ pub fn clear() {
     MAP_NAMES.write().ok().unwrap().clear();
     GRAPH.write().ok().unwrap().clear();
     MAP_INDICES.write().ok().unwrap().clear();
-    NODE_MAP.write().ok().unwrap().clear();
+    {
+        let mut node_map = NODE_MAP.write().ok().unwrap();
+        node_map.clear();
+        node_map.shrink_to_fit();
+    }
     GRIDS.write().ok().unwrap().clear();
     CHEAT_PATHS.write().ok().unwrap().clear();
 }
@@ -633,6 +637,10 @@ pub fn prepare(g_js: JsValue, exclude_maps: Option<JsValue>) {
         // Make the grid
         prepare_map(&g, map_name);
     }
+
+    let mut node_map = NODE_MAP.write().ok().unwrap();
+    node_map.clear();
+    node_map.shrink_to_fit();
 }
 
 pub fn get_path_nodes(
