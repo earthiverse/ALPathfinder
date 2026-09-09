@@ -147,7 +147,7 @@ impl HasPosition for VertexData {
 
 #[derive(Clone)]
 enum Edge {
-    WALK,
+    WALK(f32),
     TOWN,
     DOOR(u8),
     TRANSPORT(u8),
@@ -749,17 +749,28 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
         let [p1, p2] = edge.vertices();
 
         let p1_index = p1.data().node_index;
-
         let p2_index = p2.data().node_index;
 
-        graph.add_edge(p1_index, p2_index, Edge::WALK);
-        graph.add_edge(p2_index, p1_index, Edge::WALK);
+        let pos1 = p1.position();
+        let pos2 = p2.position();
+        let dx = pos2.x - pos1.x;
+        let dy = pos2.y - pos1.y;
+        let dist = (dx * dx + dy * dy).sqrt();
+
+        graph.add_edge(p1_index, p2_index, Edge::WALK(dist));
+        graph.add_edge(p2_index, p1_index, Edge::WALK(dist));
     }
 
     // Add cheat path edges directly to graph
     for (node_a, node_b) in cheat_edges {
-        graph.add_edge(node_a, node_b, Edge::WALK);
-        graph.add_edge(node_b, node_a, Edge::WALK);
+        let pos_a = graph[node_a].point;
+        let pos_b = graph[node_b].point;
+        let dx = pos_b.x - pos_a.x;
+        let dy = pos_b.y - pos_a.y;
+        let dist = (dx * dx + dy * dy).sqrt();
+
+        graph.add_edge(node_a, node_b, Edge::WALK(dist));
+        graph.add_edge(node_b, node_a, Edge::WALK(dist));
     }
     Some(())
 }
@@ -870,14 +881,7 @@ pub fn get_path_nodes(
         start_node,
         |node| node == end_node, // goal condition
         |edge| match edge.weight() {
-            Edge::WALK => {
-                let source = &graph[edge.source()];
-                let target = &graph[edge.target()];
-
-                let dx = target.point.x - source.point.x;
-                let dy = target.point.y - source.point.y;
-                (dx * dx + dy * dy).sqrt() / base_speed
-            }
+            Edge::WALK(dist) => *dist / base_speed,
             Edge::TRANSPORT(_) => 3.2, // 3.2s penalty_cd
             Edge::TOWN => 3.812,       // 3s for channel + 812ms penalty_cd
             Edge::DOOR(_) => {
@@ -1048,9 +1052,8 @@ fn build_path(
                 graph
                     .find_edge(path[i - 1], idx)
                     .and_then(|edge_idx| graph.edge_weight(edge_idx))
-                    .unwrap_or(&Edge::WALK) // Fallback to WALK if edge not found
             } else {
-                &Edge::WALK
+                None
             };
 
             PathNode {
@@ -1058,22 +1061,22 @@ fn build_path(
                 x: node.point.x,
                 y: node.point.y,
                 method: match edge {
-                    Edge::WALK => "move",
-                    Edge::TOWN => "town",
-                    Edge::DOOR(_) => "door",
-                    Edge::TRANSPORT(_) => "transport",
-                    Edge::ENTER(_) => "enter",
-                    Edge::LEAVE(_) => "leave",
+                    Some(Edge::TOWN) => "town",
+                    Some(Edge::DOOR(_)) => "door",
+                    Some(Edge::TRANSPORT(_)) => "transport",
+                    Some(Edge::ENTER(_)) => "enter",
+                    Some(Edge::LEAVE(_)) => "leave",
+                    _ => "move",
                 },
                 spawn: match edge {
-                    Edge::DOOR(spawn)
+                    Some(Edge::DOOR(spawn)
                     | Edge::TRANSPORT(spawn)
-                    | Edge::LEAVE(spawn) => Some(*spawn),
-                    Edge::ENTER(data) => Some(data.0),
+                    | Edge::LEAVE(spawn)) => Some(*spawn),
+                    Some(Edge::ENTER(data)) => Some(data.0),
                     _ => None,
                 },
                 key: match edge {
-                    Edge::ENTER(data) => data.1.clone(),
+                    Some(Edge::ENTER(data)) => data.1.clone(),
                     _ => None,
                 },
             }
