@@ -13,73 +13,115 @@ pub struct GDoor {
     pub key: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum DoorFlag {
+    Key(String),
+    Other(serde::de::IgnoredAny),
+}
+
+struct GDoorVisitor;
+
+impl<'de> serde::de::Visitor<'de> for GDoorVisitor {
+    type Value = Option<GDoor>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("a door array with at least 7 elements")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let x: f32 = match seq.next_element()? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let y: f32 = match seq.next_element()? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let width: f32 = match seq.next_element()? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let height: f32 = match seq.next_element()? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let map_to: String = match seq.next_element()? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let spawn_to: u8 = match seq.next_element()? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let spawn_from: u8 = match seq.next_element()? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let flag: Option<DoorFlag> = seq.next_element()?;
+        let requires_key = matches!(&flag, Some(DoorFlag::Key(k)) if k == "key");
+        let key = if requires_key {
+            seq.next_element()?
+        } else {
+            None
+        };
+
+        // Drain any trailing array elements
+        while let Some(serde::de::IgnoredAny) = seq.next_element()? {}
+
+        Ok(Some(GDoor {
+            x,
+            y,
+            width,
+            height,
+            map_to,
+            spawn_to,
+            spawn_from,
+            requires_key,
+            key,
+        }))
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        while let Some((serde::de::IgnoredAny, serde::de::IgnoredAny)) = map.next_entry()? {}
+        Ok(None)
+    }
+}
+
 impl<'de> Deserialize<'de> for GDoor {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let value: serde_json::Value = Deserialize::deserialize(deserializer)?;
+        deserializer.deserialize_any(GDoorVisitor)?.ok_or_else(|| {
+            serde::de::Error::custom("Door array must have at least 7 elements")
+        })
+    }
+}
 
-        if let Some(arr) = value.as_array() {
-            if arr.len() >= 7 {
-                let x = arr[0]
-                    .as_f64()
-                    .ok_or_else(|| serde::de::Error::custom("Invalid x"))?
-                    as f32;
-                let y = arr[1]
-                    .as_f64()
-                    .ok_or_else(|| serde::de::Error::custom("Invalid y"))?
-                    as f32;
-                let width = arr[2]
-                    .as_f64()
-                    .ok_or_else(|| serde::de::Error::custom("Invalid width"))?
-                    as f32;
-                let height = arr[3]
-                    .as_f64()
-                    .ok_or_else(|| serde::de::Error::custom("Invalid height"))?
-                    as f32;
-                let map_to = arr[4]
-                    .as_str()
-                    .ok_or_else(|| serde::de::Error::custom("Invalid map_to"))?
-                    .to_string();
-                let spawn_to = arr[5]
-                    .as_u64()
-                    .ok_or_else(|| serde::de::Error::custom("Invalid spawn_to"))?
-                    as u8;
-                let spawn_from = arr[6]
-                    .as_u64()
-                    .ok_or_else(|| serde::de::Error::custom("Invalid spawn_from"))?
-                    as u8;
+struct GDoorOpt(Option<GDoor>);
 
-                let requires_key = arr.len() > 7 && arr[7].as_str() == Some("key");
-                let key = if requires_key {
-                    Some(
-                        arr.get(8)
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| serde::de::Error::custom("Invalid key"))?
-                            .to_string(),
-                    )
-                } else {
-                    None
-                };
-
-                return Ok(GDoor {
-                    x,
-                    y,
-                    width,
-                    height,
-                    map_to,
-                    spawn_to,
-                    spawn_from,
-                    requires_key,
-                    key,
-                });
-            }
-        }
-
-        Err(serde::de::Error::custom(
-            "Door array must have at least 7 elements",
-        ))
+impl<'de> Deserialize<'de> for GDoorOpt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(GDoorVisitor).map(GDoorOpt)
     }
 }
 
@@ -87,11 +129,30 @@ fn deserialize_doors<'de, D>(deserializer: D) -> Result<Vec<GDoor>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let values: Vec<serde_json::Value> = Deserialize::deserialize(deserializer)?;
-    Ok(values
-        .into_iter()
-        .filter_map(|v| serde_json::from_value(v).ok())
-        .collect())
+    struct DoorsVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for DoorsVisitor {
+        type Value = Vec<GDoor>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a sequence of doors")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut doors = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+            while let Some(GDoorOpt(door_opt)) = seq.next_element()? {
+                if let Some(door) = door_opt {
+                    doors.push(door);
+                }
+            }
+            Ok(doors)
+        }
+    }
+
+    deserializer.deserialize_seq(DoorsVisitor)
 }
 
 #[derive(Deserialize, Default)]
