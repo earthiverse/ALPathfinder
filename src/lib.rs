@@ -188,6 +188,8 @@ static MAP_INDICES: RwLock<FxHashMap<String, usize>> =
 static NODE_MAP: RwLock<FxHashMap<Node, NodeIndex>> =
     RwLock::new(HashMap::with_hasher(FxBuildHasher));
 
+static MAP_NODES: RwLock<Vec<Vec<NodeIndex>>> = RwLock::new(Vec::new());
+
 static GRIDS: RwLock<FxHashMap<String, CDT>> = RwLock::new(HashMap::with_hasher(FxBuildHasher));
 
 #[wasm_bindgen(skip_typescript)]
@@ -196,6 +198,7 @@ pub fn clear() {
     *GRAPH.write().ok().unwrap() = Graph::new();
     *MAP_INDICES.write().ok().unwrap() = HashMap::with_hasher(FxBuildHasher);
     *NODE_MAP.write().ok().unwrap() = HashMap::with_hasher(FxBuildHasher);
+    *MAP_NODES.write().ok().unwrap() = Vec::new();
     *GRIDS.write().ok().unwrap() = HashMap::with_hasher(FxBuildHasher);
     *CHEAT_PATHS.write().ok().unwrap() = Vec::new();
 }
@@ -204,7 +207,16 @@ fn get_or_add_node(node: Node) -> NodeIndex {
     let mut node_map = NODE_MAP.write().ok().unwrap();
     *node_map
         .entry(node.clone())
-        .or_insert_with(|| GRAPH.write().ok().unwrap().add_node(node))
+        .or_insert_with(|| {
+            let map_id = node.map_id;
+            let node_index = GRAPH.write().ok().unwrap().add_node(node);
+            let mut map_nodes = MAP_NODES.write().ok().unwrap();
+            if map_nodes.len() <= map_id {
+                map_nodes.resize(map_id + 1, Vec::new());
+            }
+            map_nodes[map_id].push(node_index);
+            node_index
+        })
 }
 
 fn get_or_create_map_id(map_name: &str) -> usize {
@@ -226,46 +238,51 @@ fn get_map_name(map_id: usize) -> Option<String> {
     names.get(map_id).cloned()
 }
 
-fn find_closest_node(
+pub fn get_closest_node(map_name: &str, x: f32, y: f32) -> Option<NodeIndex> {
+    let graph = GRAPH.read().ok()?;
+    find_closest_node(&graph, map_name, x, y)
+}
+
+pub(crate) fn find_closest_node(
     graph: &Graph<Node, Edge>,
     map_name: &str,
     x: f32,
     y: f32,
 ) -> Option<NodeIndex> {
     let target_map_id = *MAP_INDICES.read().ok().unwrap().get(map_name)?;
-    let mut closest_index: Option<NodeIndex> = None;
-    let mut min_distance = f32::MAX;
+    let map_nodes = MAP_NODES.read().ok().unwrap();
+    let nodes_for_map = map_nodes.get(target_map_id)?;
 
-    for node_index in graph.node_indices() {
+    if nodes_for_map.is_empty() {
+        return None;
+    }
+
+    let mut candidates: Vec<(NodeIndex, f32)> = nodes_for_map
+        .iter()
+        .map(|&idx| {
+            let node = &graph[idx];
+            let dx = node.point.x - x;
+            let dy = node.point.y - y;
+            (idx, dx * dx + dy * dy)
+        })
+        .collect();
+
+    candidates.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    for (node_index, _dist) in candidates {
         let node = &graph[node_index];
-        if node.map_id != target_map_id {
-            continue;
-        }
-
-        let dx = node.point.x - x;
-        let dy = node.point.y - y;
-        let distance = dx * dx + dy * dy;
-
-        if distance >= min_distance {
-            continue;
-        }
-        if !can_walk_path(
+        if can_walk_path(
             map_name,
             node.point.x.trunc() as i32,
             node.point.y.trunc() as i32,
             x.trunc() as i32,
             y.trunc() as i32,
         ) {
-            continue;
-        }
-        min_distance = distance;
-        closest_index = Some(node_index);
-        if distance <= 1.0 {
-            return closest_index;
+            return Some(node_index);
         }
     }
 
-    return closest_index;
+    None
 }
 
 fn flood_fill_holes(triangulation: &mut CDT, spawn_points: Vec<FixedVertexHandle>) {
@@ -887,14 +904,8 @@ fn build_path(
     path_nodes
 }
 
-#[wasm_bindgen(js_name = isWalkable, skip_typescript)]
-pub fn is_walkable(map_name: &str, x: f32, y: f32) -> bool {
-    let grids = GRIDS.read().ok().unwrap();
-    let grid = match grids.get(map_name) {
-        Some(g) => g,
-        None => return false,
-    };
-
+#[inline]
+fn is_walkable_grid(grid: &CDT, x: f32, y: f32) -> bool {
     let point = Point2::new(x, y);
 
     match grid.locate(point) {
@@ -916,6 +927,17 @@ pub fn is_walkable(map_name: &str, x: f32, y: f32) -> bool {
         spade::PositionInTriangulation::OutsideOfConvexHull(_) => false,
         spade::PositionInTriangulation::NoTriangulation => false,
     }
+}
+
+#[wasm_bindgen(js_name = isWalkable, skip_typescript)]
+pub fn is_walkable(map_name: &str, x: f32, y: f32) -> bool {
+    let grids = GRIDS.read().ok().unwrap();
+    let grid = match grids.get(map_name) {
+        Some(g) => g,
+        None => return false,
+    };
+
+    is_walkable_grid(grid, x, y)
 }
 
 #[wasm_bindgen(js_name = canWalkPath, skip_typescript)]
@@ -946,7 +968,7 @@ pub fn can_walk_path(map_name: &str, x1: i32, y1: i32, x2: i32, y2: i32) -> bool
     };
 
     if x1 == x2 && y1 == y2 {
-        return is_walkable(map_name, x1 as f32, y1 as f32);
+        return is_walkable_grid(grid, x1 as f32, y1 as f32);
     }
 
     let p1 = Point2::new(x1 as f32, y1 as f32);
@@ -968,7 +990,7 @@ pub fn can_walk_path(map_name: &str, x1: i32, y1: i32, x2: i32, y2: i32) -> bool
             let t = (i as f32) / (steps as f32);
             let x = x1 as f32 + t * dx;
             let y = y1 as f32 + t * dy;
-            if !is_walkable(map_name, x, y) {
+            if !is_walkable_grid(grid, x, y) {
                 return false;
             }
         }
@@ -1058,7 +1080,7 @@ pub fn get_safe_walk_node(
             let t = (i as f32) / (steps as f32);
             let x = x_from + t * dx;
             let y = y_from + t * dy;
-            if !is_walkable(map_name, x, y) {
+            if !is_walkable_grid(grid, x, y) {
                 fully_walkable = false;
                 break;
             }
@@ -1084,7 +1106,7 @@ pub fn get_safe_walk_node(
         let current_point = Point2::new(x_from + current_ratio * dx, y_from + current_ratio * dy);
 
         let blocked = grid.intersects_constraint(last_safe_point, current_point)
-            || !is_walkable(map_name, current_point.x, current_point.y);
+            || !is_walkable_grid(grid, current_point.x, current_point.y);
 
         if blocked {
             blocked_ratio = current_ratio;
@@ -1099,7 +1121,7 @@ pub fn get_safe_walk_node(
         let mid_ratio = (safe_ratio + blocked_ratio) * 0.5;
         let mid_point = Point2::new(x_from + mid_ratio * dx, y_from + mid_ratio * dy);
 
-        if is_walkable(map_name, mid_point.x, mid_point.y)
+        if is_walkable_grid(grid, mid_point.x, mid_point.y)
             && !grid.intersects_constraint(last_safe_point, mid_point)
         {
             safe_ratio = mid_ratio;
@@ -1129,3 +1151,4 @@ pub fn get_safe_walk_to(
         None => JsValue::NULL,
     }
 }
+
