@@ -201,6 +201,8 @@ static MAP_EXITS: RwLock<Vec<Vec<MapExit>>> = RwLock::new(Vec::new());
 
 static MAP_DISTANCES: RwLock<Vec<f32>> = RwLock::new(Vec::new());
 
+static MAP_TOWN_SPAWNS: RwLock<Vec<Option<NodeIndex>>> = RwLock::new(Vec::new());
+
 static TOPOLOGY_DIRTY: RwLock<bool> = RwLock::new(true);
 
 static GRIDS: RwLock<FxHashMap<String, CDT>> = RwLock::new(HashMap::with_hasher(FxBuildHasher));
@@ -214,6 +216,7 @@ pub fn clear() {
     *MAP_NODES.write().ok().unwrap() = Vec::new();
     *MAP_EXITS.write().ok().unwrap() = Vec::new();
     *MAP_DISTANCES.write().ok().unwrap() = Vec::new();
+    *MAP_TOWN_SPAWNS.write().ok().unwrap() = Vec::new();
     *TOPOLOGY_DIRTY.write().ok().unwrap() = true;
     *GRIDS.write().ok().unwrap() = HashMap::with_hasher(FxBuildHasher);
     *CHEAT_PATHS.write().ok().unwrap() = Vec::new();
@@ -692,6 +695,18 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
 
     // Add edges to town spawn
     let town_spawn_index = triangulation.vertex(*spawns.get(0)?).data().node_index;
+    let secondary_spawn_indices: Vec<NodeIndex> = spawns
+        .iter()
+        .skip(1)
+        .map(|&s| triangulation.vertex(s).data().node_index)
+        .collect();
+    {
+        let mut town_spawns = MAP_TOWN_SPAWNS.write().ok().unwrap();
+        if town_spawns.len() <= map_id {
+            town_spawns.resize(map_id + 1, None);
+        }
+        town_spawns[map_id] = Some(town_spawn_index);
+    }
 
     flood_fill_holes(&mut triangulation, spawns);
 
@@ -724,13 +739,11 @@ pub fn prepare_map(g: &GData, map_name: &String) -> Option<()> {
         .collect();
 
     let mut graph = GRAPH.write().ok().unwrap();
-    for vertice in GRIDS.read().ok().unwrap().get(map_name).unwrap().vertices() {
-        let node_index = vertice.data().node_index;
-        if node_index == town_spawn_index {
-            continue;
+    // Only connect secondary spawns (e.g. door arrival spawns) to town spawn, avoiding 20k+ redundant edges
+    for spawn_node_index in secondary_spawn_indices {
+        if spawn_node_index != town_spawn_index {
+            graph.add_edge(spawn_node_index, town_spawn_index, Edge::TOWN);
         }
-
-        graph.add_edge(node_index, town_spawn_index, Edge::TOWN);
     }
 
     // Add all nodes to graph
@@ -802,6 +815,42 @@ pub fn prepare(g_js: JsValue, exclude_maps: Option<JsValue>) {
     ensure_map_topology();
 }
 
+#[inline]
+fn get_edge_cost(
+    weight: &Edge,
+    source: NodeIndex,
+    target: NodeIndex,
+    graph: &Graph<Node, Edge>,
+    base_speed: f32,
+    map_from_name: &str,
+    map_to_name: &str,
+    map_names: &[String],
+) -> f32 {
+    match weight {
+        Edge::WALK(dist) => *dist / base_speed,
+        Edge::TRANSPORT(_) => 3.2,
+        Edge::TOWN => 3.812,
+        Edge::DOOR(_) => {
+            let mut cost = 0.812;
+            if map_from_name.starts_with("bank") || map_to_name.starts_with("bank") {
+                return cost;
+            }
+            let source_is_bank = map_names
+                .get(graph[source].map_id)
+                .map_or(false, |n| n.starts_with("bank"));
+            let target_is_bank = map_names
+                .get(graph[target].map_id)
+                .map_or(false, |n| n.starts_with("bank"));
+            if !source_is_bank && target_is_bank {
+                cost += BANK_PENALTY;
+            }
+            cost
+        }
+        Edge::ENTER(_) => 0.812,
+        Edge::LEAVE(_) => 0.812,
+    }
+}
+
 pub fn get_path_nodes(
     map_from_name: &str,
     // TODO: Add instance
@@ -817,7 +866,13 @@ pub fn get_path_nodes(
 
     let graph = GRAPH.read().ok().unwrap();
 
+    let direct_dist_sq = (x_to - x_from) * (x_to - x_from) + (y_to - y_from) * (y_to - y_from);
+    let town_warp_cost = 3.812;
+    let walk_faster_than_town =
+        direct_dist_sq < (town_warp_cost * base_speed) * (town_warp_cost * base_speed);
+
     if map_from_name == map_to_name
+        && walk_faster_than_town
         && can_walk_path(
             map_from_name,
             x_from as i32,
@@ -826,7 +881,7 @@ pub fn get_path_nodes(
             y_to as i32,
         )
     {
-        // The path is walkable
+        // The path is walkable and faster than town warp
         let path = vec![PathNode {
             map: map_to_name.to_string(),
             x: x_to,
@@ -875,89 +930,115 @@ pub fn get_path_nodes(
     let map_exits = MAP_EXITS.read().ok().unwrap();
     let map_names = MAP_NAMES.read().ok().unwrap();
 
-    // A* pathfinding
-    let result = astar(
-        &*graph,
-        start_node,
-        |node| node == end_node, // goal condition
-        |edge| match edge.weight() {
-            Edge::WALK(dist) => *dist / base_speed,
-            Edge::TRANSPORT(_) => 3.2, // 3.2s penalty_cd
-            Edge::TOWN => 3.812,       // 3s for channel + 812ms penalty_cd
-            Edge::DOOR(_) => {
-                let mut cost = 0.812; // 812ms penalty_cd
+    let edge_cost_fn = |edge: petgraph::graph::EdgeReference<Edge>| {
+        get_edge_cost(
+            edge.weight(),
+            edge.source(),
+            edge.target(),
+            &*graph,
+            base_speed,
+            map_from_name,
+            map_to_name,
+            &map_names,
+        )
+    };
 
-                // Don't penalize if we're going to or starting from the bank
-                if map_from_name.starts_with("bank") || map_to_name.starts_with("bank") {
-                    return cost;
-                }
+    let heuristic_fn = |node: NodeIndex| {
+        let current = &graph[node];
+        let goal = &graph[end_node];
 
-                // Penalize walking through the bank
-                let source = &graph[edge.source()];
-                let target = &graph[edge.target()];
-                let source_is_bank = map_names
-                    .get(source.map_id)
-                    .map_or(false, |n| n.starts_with("bank"));
-                let target_is_bank = map_names
-                    .get(target.map_id)
-                    .map_or(false, |n| n.starts_with("bank"));
-                if !source_is_bank && target_is_bank {
-                    cost += BANK_PENALTY;
-                }
-                cost
-            }
-            Edge::ENTER(_) => 0.812, // 812ms penalty_cd
-            Edge::LEAVE(_) => 0.812, // 812ms penalty_cd
-        },
-        |node| {
-            let current = &graph[node];
-            let goal = &graph[end_node];
+        if current.map_id == goal.map_id {
+            let dx = goal.point.x - current.point.x;
+            let dy = goal.point.y - current.point.y;
+            return (dx * dx + dy * dy).sqrt() / base_speed;
+        }
 
-            if current.map_id == goal.map_id {
-                let dx = goal.point.x - current.point.x;
-                let dy = goal.point.y - current.point.y;
-                return (dx * dx + dy * dy).sqrt() / base_speed;
-            }
-
-            let mut min_h = f32::MAX;
-            if let Some(exits) = map_exits.get(current.map_id) {
-                for exit in exits {
-                    if exit.target_map_id < map_count && goal.map_id < map_count {
-                        let rem = map_distances[exit.target_map_id * map_count + goal.map_id];
-                        if !rem.is_infinite() {
-                            let dx = exit.point.x - current.point.x;
-                            let dy = exit.point.y - current.point.y;
-                            let h = (dx * dx + dy * dy).sqrt() / base_speed + exit.cost + rem;
-                            if h < min_h {
-                                min_h = h;
-                            }
+        let mut min_h = f32::MAX;
+        if let Some(exits) = map_exits.get(current.map_id) {
+            for exit in exits {
+                if exit.target_map_id < map_count && goal.map_id < map_count {
+                    let rem = map_distances[exit.target_map_id * map_count + goal.map_id];
+                    if !rem.is_infinite() {
+                        let dx = exit.point.x - current.point.x;
+                        let dy = exit.point.y - current.point.y;
+                        let h = (dx * dx + dy * dy).sqrt() / base_speed + exit.cost + rem;
+                        if h < min_h {
+                            min_h = h;
                         }
                     }
                 }
             }
+        }
 
-            if min_h < f32::MAX {
-                min_h
-            } else if current.map_id < map_count && goal.map_id < map_count {
-                let d = map_distances[current.map_id * map_count + goal.map_id];
-                if d.is_infinite() {
-                    0.0
-                } else {
-                    d
-                }
-            } else {
+        if min_h < f32::MAX {
+            min_h
+        } else if current.map_id < map_count && goal.map_id < map_count {
+            let d = map_distances[current.map_id * map_count + goal.map_id];
+            if d.is_infinite() {
                 0.0
+            } else {
+                d
             }
-        },
-    );
+        } else {
+            0.0
+        }
+    };
 
-    match result {
+    // A* pathfinding from start_node
+    let mut best_result = astar(
+        &*graph,
+        start_node,
+        |node| node == end_node,
+        edge_cost_fn,
+        heuristic_fn,
+    );
+    let mut town_warp_first = false;
+
+    // Check if town warping directly from start_node yields a faster path
+    let town_spawn_opt = MAP_TOWN_SPAWNS
+        .read()
+        .ok()
+        .unwrap()
+        .get(start_map_id)
+        .copied()
+        .flatten();
+
+    if let Some(town_spawn) = town_spawn_opt {
+        if town_spawn != start_node {
+            let walk_cost = best_result.as_ref().map(|(cost, _)| *cost).unwrap_or(f32::MAX);
+            let town_warp_cost = 3.812;
+
+            if town_warp_cost < walk_cost {
+                if let Some((from_town_cost, mut town_path)) = astar(
+                    &*graph,
+                    town_spawn,
+                    |node| node == end_node,
+                    edge_cost_fn,
+                    heuristic_fn,
+                ) {
+                    if town_warp_cost + from_town_cost < walk_cost {
+                        let mut full_path = vec![start_node];
+                        full_path.append(&mut town_path);
+                        best_result = Some((town_warp_cost + from_town_cost, full_path));
+                        town_warp_first = true;
+                    }
+                }
+            }
+        }
+    }
+
+
+    match best_result {
         Some((_cost, path)) => Some(simplify_path(&build_path(
             &graph,
             &path,
+            map_from_name,
             map_to_name,
             x_to,
             y_to,
+            base_speed,
+            &map_names,
+            town_warp_first,
         ))),
         None => None, // No path found
     }
@@ -1005,6 +1086,11 @@ fn simplify_path(path: &[PathNode]) -> Vec<PathNode> {
         for j in (i + 2..path.len()).rev() {
             let to_node = &path[j];
 
+            // Only simplify walk sequences; never skip across doors, town warps, etc.
+            if !path[i + 1..=j].iter().all(|n| n.method == "move") {
+                continue;
+            }
+
             if from_node.map == to_node.map
                 && can_walk_path(
                     &from_node.map,
@@ -1037,9 +1123,13 @@ fn simplify_path(path: &[PathNode]) -> Vec<PathNode> {
 fn build_path(
     graph: &Graph<Node, Edge>,
     path: &[NodeIndex],
+    map_from_name: &str,
     map_to_name: &str,
     x_to: f32,
     y_to: f32,
+    base_speed: f32,
+    map_names: &[String],
+    town_warp_first: bool,
 ) -> Vec<PathNode> {
     let mut path_nodes: Vec<PathNode> = path
         .iter()
@@ -1049,9 +1139,36 @@ fn build_path(
 
             // Get the method from the edge leading TO this node
             let edge = if i > 0 {
-                graph
-                    .find_edge(path[i - 1], idx)
-                    .and_then(|edge_idx| graph.edge_weight(edge_idx))
+                if i == 1 && town_warp_first {
+                    Some(&Edge::TOWN)
+                } else {
+                    graph
+                        .edges_connecting(path[i - 1], idx)
+                        .min_by(|e1, e2| {
+                            let c1 = get_edge_cost(
+                                e1.weight(),
+                                e1.source(),
+                                e1.target(),
+                                graph,
+                                base_speed,
+                                map_from_name,
+                                map_to_name,
+                                map_names,
+                            );
+                            let c2 = get_edge_cost(
+                                e2.weight(),
+                                e2.source(),
+                                e2.target(),
+                                graph,
+                                base_speed,
+                                map_from_name,
+                                map_to_name,
+                                map_names,
+                            );
+                            c1.partial_cmp(&c2).unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .map(|e| e.weight())
+                }
             } else {
                 None
             };
