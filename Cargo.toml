@@ -1,6 +1,6 @@
 [package]
 name = "alpathfinder"
-version = "0.4.9"
+version = "0.5.0"
 authors = ["Kent Rasmussen <hyprkookeez@gmail.com>"]
 edition = "2021"
 
@@ -23,6 +23,22 @@ rustc-hash = "2.1.2"
 codegen-units = 1
 opt-level = 3
 lto = "fat"
+panic = "abort"
+strip = true
 
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = ["-O4", "--precompute-propagate", "-ffm", "--signature-pruning", "--optimize-added-constants", "--low-memory-unused"]
+wasm-opt = [
+    "-O4",
+    "--enable-bulk-memory",
+    "--enable-nontrapping-float-to-int",
+    "--precompute-propagate",
+    "-ffm",
+    "--signature-pruning",
+    "--optimize-added-constants",
+    "--low-memory-unused",
+    "--traps-never-happen",
+    "--directize",
+    "--strip-debug",
+    "--strip-producers",
+    "--converge",
+]
