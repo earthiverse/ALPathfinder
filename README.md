@@ -42,6 +42,12 @@ const path = ALPathfinder.getPath(character.map, character.x, character.y, "spoo
 pathfinder.isWalkable("main", 200, 20)
 ```
 
+`getPath` also accepts an optional `exclude_maps` array (last argument) of maps that the path may not enter, pass through, or end on:
+
+```js
+const path = ALPathfinder.getPath(character.map, character.x, character.y, "spookytown", 0, 0, character.speed, ["bank_b", "bank_u"]);
+```
+
 ## Development
 
 ### Build
