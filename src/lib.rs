@@ -1269,7 +1269,7 @@ pub fn is_walkable(map_name: &str, x: f32, y: f32) -> bool {
         None => return false,
     };
 
-    is_walkable_grid(grid, x, y)
+    is_walkable_grid(grid, x.trunc(), y.trunc())
 }
 
 #[wasm_bindgen(js_name = canWalkPath, skip_typescript)]
