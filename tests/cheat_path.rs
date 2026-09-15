@@ -39,7 +39,7 @@ fn test_add_cheat_path() {
     // Off by 1 pixel is NOT walkable
     assert!(!can_walk_path("main", 0, 1, 100, 1));
 
-    let path = get_path_nodes("main", 0.0, 0.0, "main", 100.0, 0.0, None);
+    let path = get_path_nodes("main", 0.0, 0.0, "main", 100.0, 0.0, None, &[]);
     assert!(path.is_some());
     let nodes = path.unwrap();
     assert!(!nodes.is_empty());
