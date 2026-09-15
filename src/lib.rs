@@ -2,8 +2,8 @@ use clipper2_rust::{ClipType, Clipper64, FillRule, PathType, Paths64, Point};
 use once_cell::sync::Lazy;
 use petgraph::algo::astar;
 use petgraph::graph::{Graph, NodeIndex};
-use petgraph::visit::EdgeRef;
-use rustc_hash::{FxBuildHasher, FxHashMap};
+use petgraph::visit::{EdgeFiltered, EdgeRef};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use serde_wasm_bindgen::from_value;
 use spade::handles::{FixedDirectedEdgeHandle, FixedVertexHandle};
@@ -63,6 +63,8 @@ export function getPath(
   y_to: number,
   /** How fast your character can walk. Setting this to a very high number can also reduce the number of town warps. */
   speed?: number,
+  /** Maps that this path may not enter, pass through, or end on. */
+  exclude_maps?: MapKey[],
 ): PathNode[] | null;
 
 export function getSafeWalkTo(
@@ -879,8 +881,16 @@ pub fn get_path_nodes(
     x_to: f32,
     y_to: f32,
     speed: Option<f32>,
+    exclude_maps: &[String],
 ) -> Option<Vec<PathNode>> {
     let base_speed = speed.unwrap_or(50.0);
+
+    if exclude_maps
+        .iter()
+        .any(|m| m == map_from_name || m == map_to_name)
+    {
+        return None;
+    }
 
     let graph = GRAPH.read().ok().unwrap();
 
@@ -948,6 +958,19 @@ pub fn get_path_nodes(
     let map_exits = MAP_EXITS.read().ok().unwrap();
     let map_names = MAP_NAMES.read().ok().unwrap();
 
+    let excluded_map_name_set: FxHashSet<&str> = exclude_maps.iter().map(String::as_str).collect();
+    let excluded_map_vec: Vec<bool> = map_names
+        .iter()
+        .map(|name| excluded_map_name_set.contains(name.as_str()))
+        .collect();
+
+    // Reject every transition *into* an excluded map
+    let search_graph = EdgeFiltered::from_fn(&*graph, |edge| {
+        excluded_map_vec
+            .get(graph[edge.target()].map_id)
+            .map_or(true, |&excluded| !excluded)
+    });
+
     let edge_cost_fn = |edge: petgraph::graph::EdgeReference<Edge>| {
         get_edge_cost(
             edge.weight(),
@@ -1004,7 +1027,7 @@ pub fn get_path_nodes(
 
     // A* pathfinding from start_node
     let mut best_result = astar(
-        &*graph,
+        &search_graph,
         start_node,
         |node| node == end_node,
         edge_cost_fn,
@@ -1028,7 +1051,7 @@ pub fn get_path_nodes(
 
             if town_warp_cost < walk_cost {
                 if let Some((from_town_cost, mut town_path)) = astar(
-                    &*graph,
+                    &search_graph,
                     town_spawn,
                     |node| node == end_node,
                     edge_cost_fn,
@@ -1073,7 +1096,12 @@ pub fn get_path(
     x_to: f32,
     y_to: f32,
     speed: Option<f32>,
+    exclude_maps: Option<JsValue>,
 ) -> JsValue {
+    let exclude_maps: Vec<String> = exclude_maps
+        .and_then(|v| from_value(v).ok())
+        .unwrap_or_default();
+
     match get_path_nodes(
         map_from_name,
         x_from,
@@ -1082,6 +1110,7 @@ pub fn get_path(
         x_to,
         y_to,
         speed,
+        &exclude_maps,
     ) {
         Some(path) => serde_wasm_bindgen::to_value(&path).ok().unwrap(),
         None => JsValue::NULL,
