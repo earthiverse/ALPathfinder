@@ -54,6 +54,13 @@ export function canWalkPath(
   y_to: number,
 ): boolean;
 
+export interface PathOptions {
+  /** How fast your character can walk. Setting this to a very high number can also reduce the number of town warps. */
+  speed?: number;
+  /** Maps that this path may not enter, pass through, or end on. */
+  avoidMaps?: MapKey[];
+}
+
 export function getPath(
   map_from: MapKey,
   x_from: number,
@@ -61,10 +68,7 @@ export function getPath(
   map_to: MapKey,
   x_to: number,
   y_to: number,
-  /** How fast your character can walk. Setting this to a very high number can also reduce the number of town warps. */
-  speed?: number,
-  /** Maps that this path may not enter, pass through, or end on. */
-  exclude_maps?: MapKey[],
+  options?: PathOptions,
 ): PathNode[] | null;
 
 export function getSafeWalkTo(
@@ -78,6 +82,14 @@ export function getSafeWalkTo(
 export function isWalkable(map: MapKey, x: number, y: number): boolean;
 
 export function prepare(g: GData, exclude_maps?: MapKey[]): void;"#;
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct PathOptions {
+    #[serde(default)]
+    pub speed: Option<f32>,
+    #[serde(default, rename = "avoidMaps")]
+    pub avoid_maps: Option<Vec<String>>,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct SafeWalkPoint {
@@ -880,12 +892,14 @@ pub fn get_path_nodes(
     // TODO: Add instance
     x_to: f32,
     y_to: f32,
-    speed: Option<f32>,
-    exclude_maps: &[String],
+    options: Option<&PathOptions>,
 ) -> Option<Vec<PathNode>> {
-    let base_speed = speed.unwrap_or(50.0);
+    let base_speed = options.and_then(|o| o.speed).unwrap_or(50.0);
+    let avoid_maps: &[String] = options
+        .and_then(|o| o.avoid_maps.as_deref())
+        .unwrap_or(&[]);
 
-    if exclude_maps
+    if avoid_maps
         .iter()
         .any(|m| m == map_from_name || m == map_to_name)
     {
@@ -958,17 +972,17 @@ pub fn get_path_nodes(
     let map_exits = MAP_EXITS.read().ok().unwrap();
     let map_names = MAP_NAMES.read().ok().unwrap();
 
-    let excluded_map_name_set: FxHashSet<&str> = exclude_maps.iter().map(String::as_str).collect();
-    let excluded_map_vec: Vec<bool> = map_names
+    let avoided_map_name_set: FxHashSet<&str> = avoid_maps.iter().map(String::as_str).collect();
+    let avoided_map_vec: Vec<bool> = map_names
         .iter()
-        .map(|name| excluded_map_name_set.contains(name.as_str()))
+        .map(|name| avoided_map_name_set.contains(name.as_str()))
         .collect();
 
-    // Reject every transition *into* an excluded map
+    // Reject every transition *into* an avoided map
     let search_graph = EdgeFiltered::from_fn(&*graph, |edge| {
-        excluded_map_vec
+        avoided_map_vec
             .get(graph[edge.target()].map_id)
-            .map_or(true, |&excluded| !excluded)
+            .map_or(true, |&avoided| !avoided)
     });
 
     let edge_cost_fn = |edge: petgraph::graph::EdgeReference<Edge>| {
@@ -1095,12 +1109,20 @@ pub fn get_path(
     // TODO: Add instance
     x_to: f32,
     y_to: f32,
-    speed: Option<f32>,
-    exclude_maps: Option<JsValue>,
+    options: Option<JsValue>,
 ) -> JsValue {
-    let exclude_maps: Vec<String> = exclude_maps
-        .and_then(|v| from_value(v).ok())
-        .unwrap_or_default();
+    let options: Option<PathOptions> = options.and_then(|v| {
+        if v.is_null() || v.is_undefined() {
+            None
+        } else if let Some(s) = v.as_f64() {
+            Some(PathOptions {
+                speed: Some(s as f32),
+                avoid_maps: None,
+            })
+        } else {
+            from_value(v).ok()
+        }
+    });
 
     match get_path_nodes(
         map_from_name,
@@ -1109,8 +1131,7 @@ pub fn get_path(
         map_to_name,
         x_to,
         y_to,
-        speed,
-        &exclude_maps,
+        options.as_ref(),
     ) {
         Some(path) => serde_wasm_bindgen::to_value(&path).ok().unwrap(),
         None => JsValue::NULL,

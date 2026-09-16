@@ -71,7 +71,7 @@ fn test_cross_map_navigation_and_early_exit() {
     prepare_map(&g, &"map_d".to_string());
 
     // 1. Path from Map A to Map C successfully navigates through doors
-    let path = get_path_nodes("map_a", 0.0, 0.0, "map_c", 50.0, 0.0, None, &[]);
+    let path = get_path_nodes("map_a", 0.0, 0.0, "map_c", 50.0, 0.0, None);
     assert!(path.is_some(), "Expected cross-map path from map_a to map_c");
     let nodes = path.unwrap();
     assert!(!nodes.is_empty());
@@ -86,7 +86,7 @@ fn test_cross_map_navigation_and_early_exit() {
     );
 
     // 2. Disconnected map (map_a -> map_d) immediately returns None
-    let unreachable = get_path_nodes("map_a", 0.0, 0.0, "map_d", 0.0, 0.0, None, &[]);
+    let unreachable = get_path_nodes("map_a", 0.0, 0.0, "map_d", 0.0, 0.0, None);
     assert_eq!(
         unreachable, None,
         "Disconnected map should return None via early exit"
@@ -186,7 +186,7 @@ fn test_bank_penalty_routing() {
     prepare_map(&g, &"map_c".to_string());
 
     // Journey from map_a to map_c should route via map_b, avoiding the 120s bank penalty!
-    let path = get_path_nodes("map_a", 0.0, 0.0, "map_c", 0.0, 0.0, None, &[]);
+    let path = get_path_nodes("map_a", 0.0, 0.0, "map_c", 0.0, 0.0, None);
     assert!(path.is_some());
     let nodes = path.unwrap();
     let maps_visited: Vec<&str> = nodes.iter().map(|n| n.map.as_str()).collect();

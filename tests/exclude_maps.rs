@@ -1,5 +1,5 @@
 use alpathfinder::g::{GData, GDoor, GGeometry, GMap};
-use alpathfinder::{clear, get_path_nodes, prepare_map};
+use alpathfinder::{clear, get_path_nodes, prepare_map, PathOptions};
 use std::sync::Mutex;
 
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -95,8 +95,10 @@ fn test_exclude_maps_reroutes_around_shorter_path() {
         "finish_map",
         0.0,
         0.0,
-        Some(80.0),
-        &[],
+        Some(&PathOptions {
+            speed: Some(80.0),
+            ..Default::default()
+        }),
     )
     .expect("Path should be found");
 
@@ -119,8 +121,10 @@ fn test_exclude_maps_reroutes_around_shorter_path() {
         "finish_map",
         0.0,
         0.0,
-        Some(80.0),
-        &["short_map".to_string()],
+        Some(&PathOptions {
+            speed: Some(80.0),
+            avoid_maps: Some(vec!["short_map".to_string()]),
+        }),
     )
     .expect("Path should still be found when routing around short_map");
 
@@ -137,4 +141,26 @@ fn test_exclude_maps_reroutes_around_shorter_path() {
     assert_eq!(restricted_path.last().unwrap().map, "finish_map");
 
     clear();
+}
+
+#[test]
+fn test_path_options_json_deserialization() {
+    let opt_empty: PathOptions = serde_json::from_str("{}").unwrap();
+    assert_eq!(opt_empty.speed, None);
+    assert_eq!(opt_empty.avoid_maps, None);
+
+    let opt_speed: PathOptions = serde_json::from_str(r#"{"speed": 80.0}"#).unwrap();
+    assert_eq!(opt_speed.speed, Some(80.0));
+    assert_eq!(opt_speed.avoid_maps, None);
+
+    let opt_avoid: PathOptions =
+        serde_json::from_str(r#"{"speed": 75.0, "avoidMaps": ["test"]}"#).unwrap();
+    assert_eq!(opt_avoid.speed, Some(75.0));
+    assert_eq!(opt_avoid.avoid_maps, Some(vec!["test".to_string()]));
+
+    // excludeMaps / exclude_maps should not be recognized
+    let opt_exclude: PathOptions =
+        serde_json::from_str(r#"{"speed": 60.0, "excludeMaps": ["bank_b"]}"#).unwrap();
+    assert_eq!(opt_exclude.speed, Some(60.0));
+    assert_eq!(opt_exclude.avoid_maps, None);
 }
